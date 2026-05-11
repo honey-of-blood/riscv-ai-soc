@@ -23,6 +23,15 @@ MULTI_SRC = {
         ],
         "toplevel": "fetch_if_id_wrap",
     },
+    "decode_stage": {
+        "sources": [
+            RTL_DIR / "imm_gen.sv",
+            RTL_DIR / "decode_stage.sv",
+            RTL_DIR / "pipeline_reg_ID_EX.sv",
+            RTL_DIR / "decode_id_ex_wrap.sv",
+        ],
+        "toplevel": "decode_id_ex_wrap",
+    },
 }
 
 def run(module_name: str):
