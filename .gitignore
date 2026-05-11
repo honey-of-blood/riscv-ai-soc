@@ -1,0 +1,26 @@
+# Python / cocotb
+.venv/
+__pycache__/
+*.pyc
+sim_build/
+results.xml
+*.fst
+*.vcd
+
+# Yosys
+*.blif
+*.aig
+*_netlist.v
+
+# OpenLane runs
+openlane/*/runs/
+
+# GTKWave
+*.gtkw
+
+# SymbiYosys
+*/formal/*/
+
+# Editor
+.vscode/
+*.swp
