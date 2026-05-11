@@ -23,8 +23,12 @@ module reg_file (
         end
     end
 
-    // Asynchronous read — x0 always returns 0
-    assign rd1 = (rs1 == 5'b0) ? 32'b0 : regs[rs1];
-    assign rd2 = (rs2 == 5'b0) ? 32'b0 : regs[rs2];
+    // Asynchronous read with write-before-read: if WB is writing the same
+    // register being read in ID this cycle, return the new value directly.
+    // This resolves the distance-3 RAW hazard without a forwarding path.
+    assign rd1 = (rs1 == 5'b0)          ? 32'b0  :
+                 (we && rd == rs1)       ? wd     : regs[rs1];
+    assign rd2 = (rs2 == 5'b0)          ? 32'b0  :
+                 (we && rd == rs2)       ? wd     : regs[rs2];
 
 endmodule

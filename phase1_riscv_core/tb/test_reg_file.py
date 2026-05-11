@@ -79,30 +79,32 @@ async def test_two_port_simultaneous_read(dut):
 
 
 @cocotb.test()
-async def test_write_not_read_through(dut):
-    """Async read reflects OLD value on same cycle as write (not write-through)."""
+async def test_write_read_through(dut):
+    """Write-before-read: read immediately returns new write data when we=1 and rd==rs (WB→ID bypass)."""
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
     await write_reg(dut, 3, 0x11111111)
 
-    # Drive write to r3 but sample BEFORE the clock edge
+    # Drive a write to r3 and read r3 in the same cycle — WBR should return new data
     dut.we.value  = 1
     dut.rd.value  = 3
     dut.wd.value  = 0x22222222
     dut.rs1.value = 3
+    dut.rs2.value = 3
     await Timer(1, unit="ns")
-    old_val = int(dut.rd1.value)
-    assert old_val == 0x11111111, f"Expected old value 0x11111111, got 0x{old_val:08X}"
+    assert int(dut.rd1.value) == 0x22222222, \
+        f"WBR port 1 failed: expected 0x22222222, got 0x{int(dut.rd1.value):08X}"
+    assert int(dut.rd2.value) == 0x22222222, \
+        f"WBR port 2 failed: expected 0x22222222, got 0x{int(dut.rd2.value):08X}"
 
-    # After the clock edge the new value should appear
-    await RisingEdge(dut.clk)
+    # When we=0, read should return the registered old value (not bypass)
     dut.we.value = 0
     await Timer(1, unit="ns")
-    new_val = int(dut.rd1.value)
-    assert new_val == 0x22222222, f"Expected new value 0x22222222, got 0x{new_val:08X}"
+    assert int(dut.rd1.value) == 0x11111111, \
+        f"After we=0, expected stored value 0x11111111, got 0x{int(dut.rd1.value):08X}"
 
-    dut._log.info("PASS: no write-through — read reflects new value only after clock edge")
+    dut._log.info("PASS: write-before-read bypass works on both ports")
 
 
 @cocotb.test()
