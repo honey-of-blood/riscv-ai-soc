@@ -1,11 +1,13 @@
 `timescale 1ns/1ps
 
 // EX/MEM pipeline register.
-// No flush/stall ports: branch redirect flushes IF/ID and ID/EX upstream;
+// stall_i: freeze all outputs (cache miss stall — whole pipeline holds).
+// No flush port: branch redirect flushes IF/ID and ID/EX upstream;
 // by the time an instruction reaches EX/MEM it is committed to execute.
 module pipeline_reg_EX_MEM (
     input  logic        clk,
     input  logic        rst,
+    input  logic        stall_i,
 
     // Data from EX stage
     input  logic [31:0] alu_result_i,
@@ -47,7 +49,7 @@ module pipeline_reg_EX_MEM (
             wb_sel_o     <= 2'b0;
             funct3_o     <= 3'b0;
             rd_o         <= 5'b0;
-        end else begin
+        end else if (!stall_i) begin
             alu_result_o <= alu_result_i;
             rs2_data_o   <= rs2_data_i;
             pc_plus4_o   <= pc_plus4_i;

@@ -105,9 +105,10 @@ def _u32(sig):
 
 async def reset_dut(dut):
     """Assert rst for 4 cycles then release."""
-    dut.rst.value         = 1
+    dut.rst.value          = 1
     dut.imem_rdata_i.value = NOP
     dut.dmem_rdata_i.value = 0
+    dut.dmem_stall_i.value = 0   # single-cycle memory model never stalls
     for _ in range(4):
         await RisingEdge(dut.clk)
     dut.rst.value = 0

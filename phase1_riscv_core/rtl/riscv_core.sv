@@ -21,7 +21,10 @@ module riscv_core (
     output logic        dmem_we_o,
     output logic        dmem_re_o,
     output logic [3:0]  dmem_be_o,
-    input  logic [31:0] dmem_rdata_i
+    input  logic [31:0] dmem_rdata_i,
+
+    // Cache stall: asserted by L1 cache during a miss; freezes entire pipeline
+    input  logic        dmem_stall_i
 );
 
     // =========================================================================
@@ -30,6 +33,7 @@ module riscv_core (
 
     // Hazard unit outputs
     logic stall_if, stall_id, flush_id, flush_ex;
+    logic stall_id_ex, stall_ex_mem, stall_mem_wb;
 
     // Branch/jump resolution from execute stage → fetch stage + hazard unit
     logic        branch_taken;
@@ -90,10 +94,11 @@ module riscv_core (
     logic [31:0] rf_rd1, rf_rd2;
 
     // Register file: async read, sync write, write-before-read for dist-3 RAW
+    // Gate we: prevent repeated writes while MEM/WB is frozen during cache stall
     reg_file u_regfile (
         .clk (clk),
         .rst (rst),
-        .we  (wb_reg_write),
+        .we  (wb_reg_write && !dmem_stall_i),
         .rs1 (rs1_d),
         .rs2 (rs2_d),
         .rd  (wb_rd),
@@ -148,7 +153,7 @@ module riscv_core (
     pipeline_reg_ID_EX u_id_ex (
         .clk         (clk),
         .rst         (rst),
-        .stall_i     (1'b0),    // load-use handled by flushing ID/EX, not stalling it
+        .stall_i     (stall_id_ex),
         .flush_i     (flush_ex),
         .reg_write_i (reg_write_d),
         .mem_read_i  (mem_read_d),
@@ -263,13 +268,17 @@ module riscv_core (
     // Hazard unit
     // =========================================================================
     hazard_unit u_hazard (
-        .mem_read_ex_i  (mem_read_e),   // load in EX?
+        .mem_read_ex_i  (mem_read_e),
         .rd_ex_i        (rd_e),
-        .rs1_id_i       (rs1_d),        // sources of instruction in ID
+        .rs1_id_i       (rs1_d),
         .rs2_id_i       (rs2_d),
         .branch_taken_i (branch_taken),
+        .cache_stall_i  (dmem_stall_i),
         .stall_if_o     (stall_if),
         .stall_id_o     (stall_id),
+        .stall_id_ex_o  (stall_id_ex),
+        .stall_ex_mem_o (stall_ex_mem),
+        .stall_mem_wb_o (stall_mem_wb),
         .flush_id_o     (flush_id),
         .flush_ex_o     (flush_ex)
     );
@@ -286,6 +295,7 @@ module riscv_core (
     pipeline_reg_EX_MEM u_ex_mem (
         .clk          (clk),
         .rst          (rst),
+        .stall_i      (stall_ex_mem),
         .alu_result_i (ex_alu_result),
         .rs2_data_i   (ex_rs2_fwd),
         .pc_plus4_i   (ex_pc_plus4),
@@ -352,6 +362,7 @@ module riscv_core (
     pipeline_reg_MEM_WB u_mem_wb (
         .clk          (clk),
         .rst          (rst),
+        .stall_i      (stall_mem_wb),
         .alu_result_i (m_alu_result),
         .mem_rdata_i  (m_mem_rdata),
         .pc_plus4_i   (m_pc_plus4),
