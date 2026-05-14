@@ -188,9 +188,21 @@ module riscv_core (
 
     // =========================================================================
     // Forwarding unit
-    // fwd_ex_mem: EX/MEM alu_result (inst in MEM; alu_result_m declared above)
+    // fwd_ex_mem: muxed based on wb_sel_m so LUI (WB_IMM) and JAL/JALR (WB_PC4)
+    //             forward the correct value, not just alu_result.
+    //             WB_MEM (LOAD) never reaches EX/MEM forwarding — hazard unit
+    //             stalls the dependent instruction until the load is in MEM/WB.
     // fwd_mem_wb: wb_data from writeback stage (inst in WB; wb_data declared above)
     // =========================================================================
+    logic [31:0] fwd_ex_mem_val;
+    always_comb begin
+        case (wb_sel_m)
+            2'b11:   fwd_ex_mem_val = imm_m;        // WB_IMM — LUI
+            2'b10:   fwd_ex_mem_val = pc_plus4_m;   // WB_PC4 — JAL/JALR
+            default: fwd_ex_mem_val = alu_result_m; // WB_ALU — R-type, I-type, AUIPC
+        endcase
+    end
+
     logic [1:0] fwd_a, fwd_b;
 
     forwarding_unit u_fwd (
@@ -231,7 +243,7 @@ module riscv_core (
         .rd_i            (rd_e),
         .fwd_a_i         (fwd_a),
         .fwd_b_i         (fwd_b),
-        .fwd_ex_mem_i    (alu_result_m),   // EX/MEM ALU result (driven below)
+        .fwd_ex_mem_i    (fwd_ex_mem_val),  // wb_sel-corrected EX/MEM forward value
         .fwd_mem_wb_i    (wb_data),        // WB selected value (driven below)
         .alu_result_o    (ex_alu_result),
         .rs2_fwd_o       (ex_rs2_fwd),
