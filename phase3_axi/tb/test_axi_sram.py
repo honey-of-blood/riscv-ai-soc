@@ -153,3 +153,79 @@ async def overwrite_preserves_other_addresses(dut):
     val1 = await axi_read(dut, addr=0x304)
     assert val0 == 0xAAAA_AAAA, f"Overwrite failed: 0x{val0:08X}"
     assert val1 == 0x2222_2222, f"Neighbor clobbered: 0x{val1:08X}"
+
+
+@cocotb.test()
+async def address_boundary(dut):
+    """First word (addr=0) and a high address (word 255 = 0x3FC) both accessible."""
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    await axi_write(dut, addr=0x0000_0000, data=0xF1F2_F3F4)
+    val = await axi_read(dut,  addr=0x0000_0000)
+    assert val == 0xF1F2_F3F4, f"Addr 0: expected 0xF1F2F3F4, got 0x{val:08X}"
+    await axi_write(dut, addr=0x0000_03FC, data=0xA5A5_A5A5)
+    val = await axi_read(dut,  addr=0x0000_03FC)
+    assert val == 0xA5A5_A5A5, f"Addr 0x3FC: expected 0xA5A5A5A5, got 0x{val:08X}"
+
+
+@cocotb.test()
+async def all_byte_strobes(dut):
+    """Each of the 4 individual byte-enable bits written to a cleared word."""
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    base = 0x0000_0400
+    # strb=0x1: byte 0 only
+    await axi_write(dut, addr=base, data=0x0000_0000, strb=0xF)
+    await axi_write(dut, addr=base, data=0xFFFF_FF11, strb=0x1)
+    val = await axi_read(dut, addr=base)
+    assert (val & 0x0000_00FF) == 0x11,   f"strb=1 byte0 wrong:  0x{val:08X}"
+    assert (val & 0xFFFF_FF00) == 0x00,   f"strb=1 upper wrong:  0x{val:08X}"
+    # strb=0x2: byte 1 only
+    await axi_write(dut, addr=base, data=0x0000_0000, strb=0xF)
+    await axi_write(dut, addr=base, data=0xFFFF_2200, strb=0x2)
+    val = await axi_read(dut, addr=base)
+    assert (val & 0x0000_FF00) == 0x2200, f"strb=2 byte1 wrong:  0x{val:08X}"
+    assert (val & 0xFFFF_00FF) == 0x00,   f"strb=2 other wrong:  0x{val:08X}"
+    # strb=0x4: byte 2 only
+    await axi_write(dut, addr=base, data=0x0000_0000, strb=0xF)
+    await axi_write(dut, addr=base, data=0xFF33_0000, strb=0x4)
+    val = await axi_read(dut, addr=base)
+    assert (val & 0x00FF_0000) == 0x0033_0000, f"strb=4 byte2 wrong: 0x{val:08X}"
+    assert (val & 0xFF00_FFFF) == 0x00,        f"strb=4 other wrong: 0x{val:08X}"
+    # strb=0x8: byte 3 only
+    await axi_write(dut, addr=base, data=0x0000_0000, strb=0xF)
+    await axi_write(dut, addr=base, data=0x4400_0000, strb=0x8)
+    val = await axi_read(dut, addr=base)
+    assert (val & 0xFF00_0000) == 0x4400_0000, f"strb=8 byte3 wrong: 0x{val:08X}"
+    assert (val & 0x00FF_FFFF) == 0x00,        f"strb=8 other wrong: 0x{val:08X}"
+
+
+@cocotb.test()
+async def null_strobe(dut):
+    """Write with strb=0x0 must not modify any byte of the stored word."""
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    await axi_write(dut, addr=0x0000_0500, data=0x1234_5678, strb=0xF)
+    await axi_write(dut, addr=0x0000_0500, data=0xDEAD_BEEF, strb=0x0)
+    val = await axi_read(dut, addr=0x0000_0500)
+    assert val == 0x1234_5678, f"Null-strobe clobbered data: 0x{val:08X}"
+
+
+@cocotb.test()
+async def random_stress(dut):
+    """50 random (addr, data) pairs — write all, then read all back."""
+    import random
+    random.seed(42)
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    # Word-aligned addresses in [0, 0x7FF] (well within DEPTH=16384 words)
+    pairs = [(random.randrange(0, 0x800) & ~3, random.getrandbits(32)) for _ in range(50)]
+    # Collapse duplicates: last write wins
+    expected = {}
+    for addr, data in pairs:
+        expected[addr] = data
+    for addr, data in expected.items():
+        await axi_write(dut, addr=addr, data=data)
+    for addr, data in expected.items():
+        got = await axi_read(dut, addr=addr)
+        assert got == data, f"addr=0x{addr:X}: expected 0x{data:08X}, got 0x{got:08X}"

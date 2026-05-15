@@ -190,3 +190,61 @@ async def back_to_back(dut):
         data, resp = await axi_read(dut, addr=addr)
         assert resp == 0
         assert data == expected, f"addr=0x{addr:X}: 0x{data:08X}"
+
+
+@cocotb.test()
+async def long_pready_wait(dut):
+    """APB slave holds PREADY low for 7 extra cycles — tests bridge FSM patience."""
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    mem = {}
+    ApbSlave(dut, mem=mem, wait_cycles=7).start()
+    resp = await axi_write(dut, addr=0x1000_0040, data=0xFEED_FACE)
+    assert resp == 0, f"Expected OKAY on write, got {resp}"
+    assert mem.get(0x1000_0040) == 0xFEED_FACE, "APB write not stored"
+    data, resp = await axi_read(dut, addr=0x1000_0040)
+    assert resp == 0, f"Expected OKAY on read, got {resp}"
+    assert data == 0xFEED_FACE, f"Expected 0xFEEDFACE, got 0x{data:08X}"
+
+
+@cocotb.test()
+async def multi_cycle_ready_read(dut):
+    """Read with 3 extra PREADY wait cycles."""
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    mem = {0x1000_0050: 0x9876_5432}
+    ApbSlave(dut, mem=mem, wait_cycles=3).start()
+    data, resp = await axi_read(dut, addr=0x1000_0050)
+    assert resp == 0, f"Expected OKAY, got {resp}"
+    assert data == 0x9876_5432, f"Expected 0x98765432, got 0x{data:08X}"
+
+
+@cocotb.test()
+async def read_slverr(dut):
+    """Read SLVERR: PSLVERR=1 on read → RRESP=2 (isolated from write path)."""
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    ApbSlave(dut, slverr=True).start()
+    _, rresp = await axi_read(dut, addr=0x1000_0060)
+    assert rresp == 2, f"Expected SLVERR(2) on read, got {rresp}"
+
+
+@cocotb.test()
+async def alternating_rw_stress(dut):
+    """Interleaved write+read pairs to 4 different addresses."""
+    cocotb.start_soon(gen_clk(dut))
+    await reset(dut)
+    mem = {}
+    ApbSlave(dut, mem=mem).start()
+    pairs = [
+        (0x1000_0070, 0xAAAA_0001),
+        (0x1000_0074, 0xBBBB_0002),
+        (0x1000_0078, 0xCCCC_0003),
+        (0x1000_007C, 0xDDDD_0004),
+    ]
+    for addr, val in pairs:
+        resp = await axi_write(dut, addr=addr, data=val)
+        assert resp == 0, f"Write resp wrong at 0x{addr:X}: {resp}"
+        data, resp = await axi_read(dut, addr=addr)
+        assert resp == 0, f"Read resp wrong at 0x{addr:X}: {resp}"
+        assert data == val, f"addr=0x{addr:X}: expected 0x{val:08X}, got 0x{data:08X}"

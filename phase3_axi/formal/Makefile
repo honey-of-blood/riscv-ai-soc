@@ -4,7 +4,7 @@ VENV_BIN := /home/bhaavesh/projects/vlsi_projects/soc/.venv/bin
 export PATH := $(VENV_BIN):$(PATH)
 
 # Bounded model-check depth (cycles). 20 is enough for all 4 properties.
-BMC_DEPTH := 20
+BMC_DEPTH := 40
 
 .PHONY: all prove clean
 

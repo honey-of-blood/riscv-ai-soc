@@ -187,6 +187,35 @@ module crossbar_tb_top;
     repeat (20) @(posedge clk);
     env.drain();
 
+    // ── TEST 3: No-contention — M0→S0, M1→S1, M2→S2 simultaneously ───────────
+    $display("\n=== TEST 3: No-contention (M0->S0, M1->S1, M2->S2) ===");
+    fork
+      env.agent[0].drv.axi_write(resp, 32'h0000_0200, 32'hFACE_0001);
+      env.agent[1].drv.axi_write(resp, 32'h1000_0200, 32'hFACE_0002);
+      env.agent[2].drv.axi_write(resp, 32'h5000_0200, 32'hFACE_0003);
+    join
+    repeat (10) @(posedge clk);
+    env.agent[0].drv.axi_read(rdata, resp, 32'h0000_0200); @(posedge clk);
+    env.agent[1].drv.axi_read(rdata, resp, 32'h1000_0200); @(posedge clk);
+    env.agent[2].drv.axi_read(rdata, resp, 32'h5000_0200); @(posedge clk);
+
+    repeat (20) @(posedge clk);
+    env.drain();
+
+    // ── TEST 4: Back-to-back from single master (M0 → S0, 4 writes then 4 reads)
+    $display("\n=== TEST 4: Back-to-back single master (M0->S0, 4 W + 4 R) ===");
+    env.agent[0].drv.axi_write(resp, 32'h0000_0300, 32'h0001_0001); @(posedge clk);
+    env.agent[0].drv.axi_write(resp, 32'h0000_0304, 32'h0002_0002); @(posedge clk);
+    env.agent[0].drv.axi_write(resp, 32'h0000_0308, 32'h0003_0003); @(posedge clk);
+    env.agent[0].drv.axi_write(resp, 32'h0000_030C, 32'h0004_0004); @(posedge clk);
+    env.agent[0].drv.axi_read(rdata, resp, 32'h0000_0300); @(posedge clk);
+    env.agent[0].drv.axi_read(rdata, resp, 32'h0000_0304); @(posedge clk);
+    env.agent[0].drv.axi_read(rdata, resp, 32'h0000_0308); @(posedge clk);
+    env.agent[0].drv.axi_read(rdata, resp, 32'h0000_030C); @(posedge clk);
+
+    repeat (20) @(posedge clk);
+    env.drain();
+
     // ── Report ────────────────────────────────────────────────────────────────
     env.report_phase(ph);
 

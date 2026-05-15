@@ -608,6 +608,28 @@ always @(*) begin
                    (rd_busy[2] && rd_grant[2]==2'd2));
     end
 end
+
+// P5: slave_idle_no_valid — an idle slave receives no AW/W/AR valid signals
+always @(*) begin
+    if (!wr_busy[0]) begin assert(!s_awvalid[0]); assert(!s_wvalid[0]); end
+    if (!wr_busy[1]) begin assert(!s_awvalid[1]); assert(!s_wvalid[1]); end
+    if (!wr_busy[2]) begin assert(!s_awvalid[2]); assert(!s_wvalid[2]); end
+    if (!rd_busy[0]) assert(!s_arvalid[0]);
+    if (!rd_busy[1]) assert(!s_arvalid[1]);
+    if (!rd_busy[2]) assert(!s_arvalid[2]);
+end
+
+// P6: awready_implies_busy — AWREADY to master m only when a slave has granted m
+always @(*) begin
+    if (rst_n) begin
+        if (m_awready[0])
+            assert((wr_busy[0]&&wr_grant[0]==2'd0)||(wr_busy[1]&&wr_grant[1]==2'd0)||(wr_busy[2]&&wr_grant[2]==2'd0));
+        if (m_awready[1])
+            assert((wr_busy[0]&&wr_grant[0]==2'd1)||(wr_busy[1]&&wr_grant[1]==2'd1)||(wr_busy[2]&&wr_grant[2]==2'd1));
+        if (m_awready[2])
+            assert((wr_busy[0]&&wr_grant[0]==2'd2)||(wr_busy[1]&&wr_grant[1]==2'd2)||(wr_busy[2]&&wr_grant[2]==2'd2));
+    end
+end
 `endif
 
 endmodule
