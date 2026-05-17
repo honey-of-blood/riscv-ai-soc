@@ -240,6 +240,10 @@ package accel_tb_pkg;
     bit cov_signed_weights;
     bit cov_zero_activations;
     bit cov_back_to_back;
+    bit cov_max_positive;
+    bit cov_max_negative;
+    bit cov_mixed_sign;
+    bit cov_ctrl_lifecycle;
 
     int unsigned total_computes = 0;
 
@@ -254,6 +258,10 @@ package accel_tb_pkg;
         "signed_weights":    cov_signed_weights     = 1;
         "zero_activations":  cov_zero_activations   = 1;
         "back_to_back":      cov_back_to_back       = 1;
+        "max_positive":      cov_max_positive       = 1;
+        "max_negative":      cov_max_negative       = 1;
+        "mixed_sign":        cov_mixed_sign         = 1;
+        "ctrl_lifecycle":    cov_ctrl_lifecycle     = 1;
       endcase
       total_computes++;
     endfunction
@@ -261,11 +269,14 @@ package accel_tb_pkg;
     virtual function void report_phase(uvm_phase phase);
       int hits;
       hits = int'(cov_identity_weights) + int'(cov_full_matmul) + int'(cov_signed_weights)
-           + int'(cov_zero_activations) + int'(cov_back_to_back);
-      $display("[COV] %0d/5 scenario bins covered  (computes=%0d)", hits, total_computes);
-      $display("[COV] identity_weights=%0b full_matmul=%0b signed_weights=%0b zero_act=%0b back_to_back=%0b",
+           + int'(cov_zero_activations) + int'(cov_back_to_back)
+           + int'(cov_max_positive)     + int'(cov_max_negative)
+           + int'(cov_mixed_sign)       + int'(cov_ctrl_lifecycle);
+      $display("[COV] %0d/9 scenario bins covered  (computes=%0d)", hits, total_computes);
+      $display("[COV] identity=%0b full=%0b signed=%0b zero=%0b b2b=%0b max+=%0b max-=%0b mixed=%0b ctrl=%0b",
                cov_identity_weights, cov_full_matmul, cov_signed_weights,
-               cov_zero_activations, cov_back_to_back);
+               cov_zero_activations, cov_back_to_back,
+               cov_max_positive, cov_max_negative, cov_mixed_sign, cov_ctrl_lifecycle);
     endfunction
   endclass
 
