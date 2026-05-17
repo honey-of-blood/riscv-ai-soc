@@ -1,0 +1,179 @@
+`timescale 1ns/1ps
+// Phase 5 SoC top-level.
+//
+// Components:
+//   riscv_core      — Phase 1 RV32I 5-stage pipeline
+//   instr_rom       — 2 KB instruction ROM (firmware.hex)
+//   dmem_axi_adapter— converts cpu dmem RE/WE to AXI4-Lite master
+//   axi4_crossbar   — Phase 3 3M×3S crossbar (master 0 = CPU; 1,2 tied)
+//   axi_sram ×2     — slave 0 (0x0000_xxxx data) slave 1 (0x1000_xxxx unused)
+//   accel_top       — Phase 4 systolic array (slave 2, 0x5000_xxxx)
+//
+// Address map (decoded by crossbar on addr[31:16]):
+//   0x0000_xxxx  → SRAM0  (64 KB data memory)
+//   0x1000_xxxx  → SRAM1  (placeholder)
+//   0x5000_xxxx  → accel_top MMIO
+
+module soc_top (
+    input  logic clk,
+    input  logic rst_n
+);
+
+// ── Instruction memory ────────────────────────────────────────────────────────
+logic [31:0] imem_addr, imem_rdata;
+
+instr_rom u_irom (
+    .clk   (clk),
+    .addr  (imem_addr),
+    .rdata (imem_rdata)
+);
+
+// ── CPU ───────────────────────────────────────────────────────────────────────
+logic [31:0] dmem_addr, dmem_wdata, dmem_rdata;
+logic        dmem_we, dmem_re, dmem_stall;
+logic  [3:0] dmem_be;
+
+riscv_core u_cpu (
+    .clk          (clk),
+    .rst          (~rst_n),    // riscv_core uses active-high reset
+    .imem_addr_o  (imem_addr),
+    .imem_rdata_i (imem_rdata),
+    .dmem_addr_o  (dmem_addr),
+    .dmem_wdata_o (dmem_wdata),
+    .dmem_we_o    (dmem_we),
+    .dmem_re_o    (dmem_re),
+    .dmem_be_o    (dmem_be),
+    .dmem_rdata_i (dmem_rdata),
+    .dmem_stall_i (dmem_stall)
+);
+
+// ── CPU dmem → AXI4-Lite adapter ─────────────────────────────────────────────
+// Master 0 wires (CPU → crossbar)
+logic [31:0] m0_awaddr, m0_wdata, m0_araddr, m0_rdata;
+logic  [3:0] m0_wstrb;
+logic  [1:0] m0_bresp, m0_rresp;
+logic        m0_awvalid, m0_awready, m0_wvalid, m0_wready;
+logic        m0_bvalid, m0_bready;
+logic        m0_arvalid, m0_arready, m0_rvalid, m0_rready;
+
+dmem_axi_adapter u_adapter (
+    .clk        (clk),
+    .rst_n      (rst_n),
+    // CPU side
+    .cpu_re_i   (dmem_re),
+    .cpu_we_i   (dmem_we),
+    .cpu_addr_i (dmem_addr),
+    .cpu_wdata_i(dmem_wdata),
+    .cpu_be_i   (dmem_be),
+    .cpu_rdata_o(dmem_rdata),
+    .cpu_stall_o(dmem_stall),
+    // AXI master 0
+    .m_awaddr   (m0_awaddr),  .m_awvalid(m0_awvalid), .m_awready(m0_awready),
+    .m_wdata    (m0_wdata),   .m_wstrb  (m0_wstrb),
+    .m_wvalid   (m0_wvalid),  .m_wready (m0_wready),
+    .m_bresp    (m0_bresp),   .m_bvalid (m0_bvalid),  .m_bready (m0_bready),
+    .m_araddr   (m0_araddr),  .m_arvalid(m0_arvalid), .m_arready(m0_arready),
+    .m_rdata    (m0_rdata),   .m_rresp  (m0_rresp),
+    .m_rvalid   (m0_rvalid),  .m_rready (m0_rready)
+);
+
+// ── Masters 1 and 2 (tied off) ────────────────────────────────────────────────
+logic [31:0] m1_awaddr=0, m1_wdata=0, m1_araddr=0;
+logic  [3:0] m1_wstrb=0;
+logic        m1_awvalid=0, m1_wvalid=0, m1_bready=0, m1_arvalid=0, m1_rready=0;
+logic [31:0] m1_rdata;
+logic  [1:0] m1_bresp, m1_rresp;
+logic        m1_awready, m1_wready, m1_bvalid, m1_arready, m1_rvalid;
+
+logic [31:0] m2_awaddr=0, m2_wdata=0, m2_araddr=0;
+logic  [3:0] m2_wstrb=0;
+logic        m2_awvalid=0, m2_wvalid=0, m2_bready=0, m2_arvalid=0, m2_rready=0;
+logic [31:0] m2_rdata;
+logic  [1:0] m2_bresp, m2_rresp;
+logic        m2_awready, m2_wready, m2_bvalid, m2_arready, m2_rvalid;
+
+// ── Crossbar slave wires ──────────────────────────────────────────────────────
+logic [31:0] s0_awaddr, s0_wdata, s0_araddr, s0_rdata;
+logic  [3:0] s0_wstrb;
+logic  [1:0] s0_bresp, s0_rresp;
+logic        s0_awvalid, s0_awready, s0_wvalid, s0_wready;
+logic        s0_bvalid, s0_bready, s0_arvalid, s0_arready, s0_rvalid, s0_rready;
+
+logic [31:0] s1_awaddr, s1_wdata, s1_araddr, s1_rdata;
+logic  [3:0] s1_wstrb;
+logic  [1:0] s1_bresp, s1_rresp;
+logic        s1_awvalid, s1_awready, s1_wvalid, s1_wready;
+logic        s1_bvalid, s1_bready, s1_arvalid, s1_arready, s1_rvalid, s1_rready;
+
+logic [31:0] s2_awaddr, s2_wdata, s2_araddr, s2_rdata;
+logic  [3:0] s2_wstrb;
+logic  [1:0] s2_bresp, s2_rresp;
+logic        s2_awvalid, s2_awready, s2_wvalid, s2_wready;
+logic        s2_bvalid, s2_bready, s2_arvalid, s2_arready, s2_rvalid, s2_rready;
+
+// ── Crossbar ──────────────────────────────────────────────────────────────────
+axi4_crossbar u_xbar (
+    .clk(clk), .rst_n(rst_n),
+    .m0_awaddr(m0_awaddr), .m0_awvalid(m0_awvalid), .m0_awready(m0_awready),
+    .m0_wdata (m0_wdata),  .m0_wstrb  (m0_wstrb),   .m0_wvalid (m0_wvalid),  .m0_wready(m0_wready),
+    .m0_bresp (m0_bresp),  .m0_bvalid (m0_bvalid),  .m0_bready (m0_bready),
+    .m0_araddr(m0_araddr), .m0_arvalid(m0_arvalid), .m0_arready(m0_arready),
+    .m0_rdata (m0_rdata),  .m0_rresp  (m0_rresp),   .m0_rvalid (m0_rvalid),  .m0_rready(m0_rready),
+    .m1_awaddr(m1_awaddr), .m1_awvalid(m1_awvalid), .m1_awready(m1_awready),
+    .m1_wdata (m1_wdata),  .m1_wstrb  (m1_wstrb),   .m1_wvalid (m1_wvalid),  .m1_wready(m1_wready),
+    .m1_bresp (m1_bresp),  .m1_bvalid (m1_bvalid),  .m1_bready (m1_bready),
+    .m1_araddr(m1_araddr), .m1_arvalid(m1_arvalid), .m1_arready(m1_arready),
+    .m1_rdata (m1_rdata),  .m1_rresp  (m1_rresp),   .m1_rvalid (m1_rvalid),  .m1_rready(m1_rready),
+    .m2_awaddr(m2_awaddr), .m2_awvalid(m2_awvalid), .m2_awready(m2_awready),
+    .m2_wdata (m2_wdata),  .m2_wstrb  (m2_wstrb),   .m2_wvalid (m2_wvalid),  .m2_wready(m2_wready),
+    .m2_bresp (m2_bresp),  .m2_bvalid (m2_bvalid),  .m2_bready (m2_bready),
+    .m2_araddr(m2_araddr), .m2_arvalid(m2_arvalid), .m2_arready(m2_arready),
+    .m2_rdata (m2_rdata),  .m2_rresp  (m2_rresp),   .m2_rvalid (m2_rvalid),  .m2_rready(m2_rready),
+    .s0_awaddr(s0_awaddr), .s0_awvalid(s0_awvalid), .s0_awready(s0_awready),
+    .s0_wdata (s0_wdata),  .s0_wstrb  (s0_wstrb),   .s0_wvalid (s0_wvalid),  .s0_wready(s0_wready),
+    .s0_bresp (s0_bresp),  .s0_bvalid (s0_bvalid),  .s0_bready (s0_bready),
+    .s0_araddr(s0_araddr), .s0_arvalid(s0_arvalid), .s0_arready(s0_arready),
+    .s0_rdata (s0_rdata),  .s0_rresp  (s0_rresp),   .s0_rvalid (s0_rvalid),  .s0_rready(s0_rready),
+    .s1_awaddr(s1_awaddr), .s1_awvalid(s1_awvalid), .s1_awready(s1_awready),
+    .s1_wdata (s1_wdata),  .s1_wstrb  (s1_wstrb),   .s1_wvalid (s1_wvalid),  .s1_wready(s1_wready),
+    .s1_bresp (s1_bresp),  .s1_bvalid (s1_bvalid),  .s1_bready (s1_bready),
+    .s1_araddr(s1_araddr), .s1_arvalid(s1_arvalid), .s1_arready(s1_arready),
+    .s1_rdata (s1_rdata),  .s1_rresp  (s1_rresp),   .s1_rvalid (s1_rvalid),  .s1_rready(s1_rready),
+    .s2_awaddr(s2_awaddr), .s2_awvalid(s2_awvalid), .s2_awready(s2_awready),
+    .s2_wdata (s2_wdata),  .s2_wstrb  (s2_wstrb),   .s2_wvalid (s2_wvalid),  .s2_wready(s2_wready),
+    .s2_bresp (s2_bresp),  .s2_bvalid (s2_bvalid),  .s2_bready (s2_bready),
+    .s2_araddr(s2_araddr), .s2_arvalid(s2_arvalid), .s2_arready(s2_arready),
+    .s2_rdata (s2_rdata),  .s2_rresp  (s2_rresp),   .s2_rvalid (s2_rvalid),  .s2_rready(s2_rready)
+);
+
+// ── Slave 0: SRAM — data memory (0x0000_xxxx) ────────────────────────────────
+axi_sram u_sram0 (
+    .clk(clk), .rst_n(rst_n),
+    .s_awaddr(s0_awaddr), .s_awvalid(s0_awvalid), .s_awready(s0_awready),
+    .s_wdata (s0_wdata),  .s_wstrb  (s0_wstrb),   .s_wvalid (s0_wvalid),  .s_wready(s0_wready),
+    .s_bresp (s0_bresp),  .s_bvalid (s0_bvalid),  .s_bready (s0_bready),
+    .s_araddr(s0_araddr), .s_arvalid(s0_arvalid), .s_arready(s0_arready),
+    .s_rdata (s0_rdata),  .s_rresp  (s0_rresp),   .s_rvalid (s0_rvalid),  .s_rready(s0_rready)
+);
+
+// ── Slave 1: SRAM placeholder (0x1000_xxxx) ───────────────────────────────────
+axi_sram u_sram1 (
+    .clk(clk), .rst_n(rst_n),
+    .s_awaddr(s1_awaddr), .s_awvalid(s1_awvalid), .s_awready(s1_awready),
+    .s_wdata (s1_wdata),  .s_wstrb  (s1_wstrb),   .s_wvalid (s1_wvalid),  .s_wready(s1_wready),
+    .s_bresp (s1_bresp),  .s_bvalid (s1_bvalid),  .s_bready (s1_bready),
+    .s_araddr(s1_araddr), .s_arvalid(s1_arvalid), .s_arready(s1_arready),
+    .s_rdata (s1_rdata),  .s_rresp  (s1_rresp),   .s_rvalid (s1_rvalid),  .s_rready(s1_rready)
+);
+
+// ── Slave 2: AI accelerator (0x5000_xxxx) ────────────────────────────────────
+accel_top u_accel (
+    .clk(clk), .rst_n(rst_n),
+    .s_awaddr(s2_awaddr), .s_awvalid(s2_awvalid), .s_awready(s2_awready),
+    .s_wdata (s2_wdata),  .s_wstrb  (s2_wstrb),   .s_wvalid (s2_wvalid),  .s_wready(s2_wready),
+    .s_bresp (s2_bresp),  .s_bvalid (s2_bvalid),  .s_bready (s2_bready),
+    .s_araddr(s2_araddr), .s_arvalid(s2_arvalid), .s_arready(s2_arready),
+    .s_rdata (s2_rdata),  .s_rresp  (s2_rresp),   .s_rvalid (s2_rvalid),  .s_rready(s2_rready)
+);
+
+endmodule
