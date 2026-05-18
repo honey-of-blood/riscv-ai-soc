@@ -1,4 +1,5 @@
 PH1   := ../../phase1_riscv_core/rtl
+PH2   := ../../phase2_cache/rtl
 PH3   := ../../phase3_axi/rtl
 PH4   := ../../phase4_accelerator/rtl
 RTL   := ../rtl
@@ -7,7 +8,7 @@ BUILD := ./build
 
 VLTOR_FLAGS := --sv --timing --top-module soc_tb \
                -Wno-TIMESCALEMOD -Wno-MULTIDRIVEN -Wno-CASEINCOMPLETE \
-               -Wno-INITIALDLY -Wno-UNDRIVEN \
+               -Wno-INITIALDLY -Wno-UNDRIVEN -Wno-UNUSED \
                --assert --trace-fst --cc --exe --build
 
 SRCS := $(PH1)/alu.sv \
@@ -25,6 +26,10 @@ SRCS := $(PH1)/alu.sv \
         $(PH1)/hazard_unit.sv \
         $(PH1)/forwarding_unit.sv \
         $(PH1)/riscv_core.sv \
+        $(PH2)/cache_tag_array.sv \
+        $(PH2)/cache_data_array.sv \
+        $(PH2)/cache_controller.sv \
+        $(PH2)/cache_top.sv \
         $(PH3)/axi4_crossbar.sv \
         $(PH3)/axi_sram.sv \
         $(PH4)/pe.sv \
@@ -32,6 +37,7 @@ SRCS := $(PH1)/alu.sv \
         $(PH4)/accel_top.sv \
         $(RTL)/instr_rom.sv \
         $(RTL)/dmem_axi_adapter.sv \
+        $(RTL)/axi4_burst_to_lite.sv \
         $(RTL)/soc_top.sv \
         soc_tb.sv
 

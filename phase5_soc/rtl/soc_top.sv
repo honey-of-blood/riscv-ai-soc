@@ -1,18 +1,22 @@
 `timescale 1ns/1ps
-// Phase 5 SoC top-level.
+// Phase 5 SoC top-level — all four phases integrated.
 //
-// Components:
-//   riscv_core      — Phase 1 RV32I 5-stage pipeline
-//   instr_rom       — 2 KB instruction ROM (firmware.hex)
-//   dmem_axi_adapter— converts cpu dmem RE/WE to AXI4-Lite master
-//   axi4_crossbar   — Phase 3 3M×3S crossbar (master 0 = CPU; 1,2 tied)
-//   axi_sram ×2     — slave 0 (0x0000_xxxx data) slave 1 (0x1000_xxxx unused)
-//   accel_top       — Phase 4 systolic array (slave 2, 0x5000_xxxx)
+// Data path:
+//   riscv_core (Ph1) ─┬─ cacheable (0x0000_xxxx) ──→ cache_top (Ph2)
+//                     │                                    │ AXI4 burst
+//                     │                          axi4_burst_to_lite
+//                     │                                    │ AXI4-Lite
+//                     └─ MMIO (0x5000_xxxx) ──→ dmem_axi_adapter
+//                                                          │
+//                                             axi4_crossbar (Ph3) M0/M1
+//                                              ├── S0: axi_sram (data)
+//                                              ├── S1: axi_sram (placeholder)
+//                                              └── S2: accel_top (Ph4)
 //
-// Address map (decoded by crossbar on addr[31:16]):
-//   0x0000_xxxx  → SRAM0  (64 KB data memory)
-//   0x1000_xxxx  → SRAM1  (placeholder)
-//   0x5000_xxxx  → accel_top MMIO
+// Address map (crossbar decodes addr[31:16]):
+//   0x0000_xxxx → SRAM0  (64 KB data memory, cached)
+//   0x1000_xxxx → SRAM1  (placeholder)
+//   0x5000_xxxx → accel_top MMIO (non-cached, adapter bypass)
 
 module soc_top (
     input  logic clk,
@@ -21,12 +25,7 @@ module soc_top (
 
 // ── Instruction memory ────────────────────────────────────────────────────────
 logic [31:0] imem_addr, imem_rdata;
-
-instr_rom u_irom (
-    .clk   (clk),
-    .addr  (imem_addr),
-    .rdata (imem_rdata)
-);
+instr_rom u_irom (.clk(clk), .addr(imem_addr), .rdata(imem_rdata));
 
 // ── CPU ───────────────────────────────────────────────────────────────────────
 logic [31:0] dmem_addr, dmem_wdata, dmem_rdata;
@@ -35,7 +34,7 @@ logic  [3:0] dmem_be;
 
 riscv_core u_cpu (
     .clk          (clk),
-    .rst          (~rst_n),    // riscv_core uses active-high reset
+    .rst          (~rst_n),
     .imem_addr_o  (imem_addr),
     .imem_rdata_i (imem_rdata),
     .dmem_addr_o  (dmem_addr),
@@ -47,8 +46,63 @@ riscv_core u_cpu (
     .dmem_stall_i (dmem_stall)
 );
 
-// ── CPU dmem → AXI4-Lite adapter ─────────────────────────────────────────────
-// Master 0 wires (CPU → crossbar)
+// ── Address routing: cache vs MMIO bypass ────────────────────────────────────
+// MMIO region (0x5000_xxxx) is non-cacheable; all others go through L1 cache.
+logic is_mmio;
+assign is_mmio = (dmem_addr[31:16] == 16'h5000);
+
+logic        cpu_cache_re, cpu_cache_we;
+logic        cpu_mmio_re,  cpu_mmio_we;
+assign cpu_cache_re = dmem_re & ~is_mmio;
+assign cpu_cache_we = dmem_we & ~is_mmio;
+assign cpu_mmio_re  = dmem_re &  is_mmio;
+assign cpu_mmio_we  = dmem_we &  is_mmio;
+
+// ── Phase 2: L1 data cache ────────────────────────────────────────────────────
+logic [31:0] cache_rdata;
+logic        cache_stall;
+
+// Cache AXI4 burst master wires → burst-to-lite bridge slave port
+logic [31:0] c_awaddr, c_wdata, c_araddr, c_rdata;
+logic  [3:0] c_wstrb;
+logic  [7:0] c_awlen, c_arlen;
+logic  [2:0] c_awsize, c_arsize;
+logic  [1:0] c_awburst, c_arburst;
+logic        c_awvalid, c_awready;
+logic        c_wvalid, c_wready, c_wlast;
+logic  [1:0] c_bresp;
+logic        c_bvalid, c_bready;
+logic        c_arvalid, c_arready;
+logic  [1:0] c_rresp;
+logic        c_rvalid, c_rready, c_rlast;
+
+cache_top u_cache (
+    .clk            (clk),
+    .rst            (~rst_n),
+    // CPU side
+    .cpu_re_i       (cpu_cache_re),
+    .cpu_we_i       (cpu_cache_we),
+    .cpu_addr_i     (dmem_addr),
+    .cpu_wdata_i    (dmem_wdata),
+    .cpu_be_i       (dmem_be),
+    .cpu_rdata_o    (cache_rdata),
+    .cpu_stall_o    (cache_stall),
+    // AXI4 burst master → bridge
+    .m_axi_awvalid_o(c_awvalid),  .m_axi_awready_i(c_awready),
+    .m_axi_awaddr_o (c_awaddr),   .m_axi_awlen_o  (c_awlen),
+    .m_axi_awsize_o (c_awsize),   .m_axi_awburst_o(c_awburst),
+    .m_axi_wvalid_o (c_wvalid),   .m_axi_wready_i (c_wready),
+    .m_axi_wdata_o  (c_wdata),    .m_axi_wstrb_o  (c_wstrb),
+    .m_axi_wlast_o  (c_wlast),
+    .m_axi_bvalid_i (c_bvalid),   .m_axi_bready_o (c_bready),
+    .m_axi_arvalid_o(c_arvalid),  .m_axi_arready_i(c_arready),
+    .m_axi_araddr_o (c_araddr),   .m_axi_arlen_o  (c_arlen),
+    .m_axi_arsize_o (c_arsize),   .m_axi_arburst_o(c_arburst),
+    .m_axi_rvalid_i (c_rvalid),   .m_axi_rready_o (c_rready),
+    .m_axi_rdata_i  (c_rdata),    .m_axi_rlast_i  (c_rlast)
+);
+
+// ── Burst-to-Lite bridge: cache → crossbar master 0 ──────────────────────────
 logic [31:0] m0_awaddr, m0_wdata, m0_araddr, m0_rdata;
 logic  [3:0] m0_wstrb;
 logic  [1:0] m0_bresp, m0_rresp;
@@ -56,35 +110,57 @@ logic        m0_awvalid, m0_awready, m0_wvalid, m0_wready;
 logic        m0_bvalid, m0_bready;
 logic        m0_arvalid, m0_arready, m0_rvalid, m0_rready;
 
-dmem_axi_adapter u_adapter (
-    .clk        (clk),
-    .rst_n      (rst_n),
-    // CPU side
-    .cpu_re_i   (dmem_re),
-    .cpu_we_i   (dmem_we),
-    .cpu_addr_i (dmem_addr),
-    .cpu_wdata_i(dmem_wdata),
-    .cpu_be_i   (dmem_be),
-    .cpu_rdata_o(dmem_rdata),
-    .cpu_stall_o(dmem_stall),
-    // AXI master 0
-    .m_awaddr   (m0_awaddr),  .m_awvalid(m0_awvalid), .m_awready(m0_awready),
-    .m_wdata    (m0_wdata),   .m_wstrb  (m0_wstrb),
-    .m_wvalid   (m0_wvalid),  .m_wready (m0_wready),
-    .m_bresp    (m0_bresp),   .m_bvalid (m0_bvalid),  .m_bready (m0_bready),
-    .m_araddr   (m0_araddr),  .m_arvalid(m0_arvalid), .m_arready(m0_arready),
-    .m_rdata    (m0_rdata),   .m_rresp  (m0_rresp),
-    .m_rvalid   (m0_rvalid),  .m_rready (m0_rready)
+axi4_burst_to_lite u_b2l (
+    .clk       (clk), .rst_n     (rst_n),
+    // from cache
+    .s_awaddr  (c_awaddr),  .s_awvalid (c_awvalid),  .s_awready (c_awready),
+    .s_wdata   (c_wdata),   .s_wstrb   (c_wstrb),    .s_wlast   (c_wlast),
+    .s_wvalid  (c_wvalid),  .s_wready  (c_wready),
+    .s_bresp   (c_bresp),   .s_bvalid  (c_bvalid),   .s_bready  (c_bready),
+    .s_araddr  (c_araddr),  .s_arvalid (c_arvalid),  .s_arready (c_arready),
+    .s_rdata   (c_rdata),   .s_rresp   (c_rresp),    .s_rlast   (c_rlast),
+    .s_rvalid  (c_rvalid),  .s_rready  (c_rready),
+    // to crossbar m0
+    .m_awaddr  (m0_awaddr), .m_awvalid (m0_awvalid), .m_awready (m0_awready),
+    .m_wdata   (m0_wdata),  .m_wstrb   (m0_wstrb),   .m_wvalid  (m0_wvalid),
+    .m_wready  (m0_wready),
+    .m_bresp   (m0_bresp),  .m_bvalid  (m0_bvalid),  .m_bready  (m0_bready),
+    .m_araddr  (m0_araddr), .m_arvalid (m0_arvalid), .m_arready (m0_arready),
+    .m_rdata   (m0_rdata),  .m_rresp   (m0_rresp),   .m_rvalid  (m0_rvalid),
+    .m_rready  (m0_rready)
 );
 
-// ── Masters 1 and 2 (tied off) ────────────────────────────────────────────────
-logic [31:0] m1_awaddr=0, m1_wdata=0, m1_araddr=0;
-logic  [3:0] m1_wstrb=0;
-logic        m1_awvalid=0, m1_wvalid=0, m1_bready=0, m1_arvalid=0, m1_rready=0;
-logic [31:0] m1_rdata;
-logic  [1:0] m1_bresp, m1_rresp;
-logic        m1_awready, m1_wready, m1_bvalid, m1_arready, m1_rvalid;
+// ── MMIO adapter: CPU → crossbar master 1 (0x5000_xxxx bypass) ───────────────
+logic [31:0] mmio_rdata;
+logic        mmio_stall;
 
+logic [31:0] m1_awaddr, m1_wdata, m1_araddr, m1_rdata;
+logic  [3:0] m1_wstrb;
+logic  [1:0] m1_bresp, m1_rresp;
+logic        m1_awvalid, m1_awready, m1_wvalid, m1_wready;
+logic        m1_bvalid, m1_bready;
+logic        m1_arvalid, m1_arready, m1_rvalid, m1_rready;
+
+dmem_axi_adapter u_adapter (
+    .clk        (clk), .rst_n      (rst_n),
+    .cpu_re_i   (cpu_mmio_re),   .cpu_we_i   (cpu_mmio_we),
+    .cpu_addr_i (dmem_addr),     .cpu_wdata_i(dmem_wdata),
+    .cpu_be_i   (dmem_be),
+    .cpu_rdata_o(mmio_rdata),    .cpu_stall_o(mmio_stall),
+    .m_awaddr   (m1_awaddr),  .m_awvalid(m1_awvalid), .m_awready(m1_awready),
+    .m_wdata    (m1_wdata),   .m_wstrb  (m1_wstrb),
+    .m_wvalid   (m1_wvalid),  .m_wready (m1_wready),
+    .m_bresp    (m1_bresp),   .m_bvalid (m1_bvalid),  .m_bready (m1_bready),
+    .m_araddr   (m1_araddr),  .m_arvalid(m1_arvalid), .m_arready(m1_arready),
+    .m_rdata    (m1_rdata),   .m_rresp  (m1_rresp),
+    .m_rvalid   (m1_rvalid),  .m_rready (m1_rready)
+);
+
+// ── CPU dmem mux: select cache or MMIO path ───────────────────────────────────
+assign dmem_rdata = is_mmio ? mmio_rdata : cache_rdata;
+assign dmem_stall = is_mmio ? mmio_stall : cache_stall;
+
+// ── Master 2: tied off ────────────────────────────────────────────────────────
 logic [31:0] m2_awaddr=0, m2_wdata=0, m2_araddr=0;
 logic  [3:0] m2_wstrb=0;
 logic        m2_awvalid=0, m2_wvalid=0, m2_bready=0, m2_arvalid=0, m2_rready=0;
@@ -111,7 +187,7 @@ logic  [1:0] s2_bresp, s2_rresp;
 logic        s2_awvalid, s2_awready, s2_wvalid, s2_wready;
 logic        s2_bvalid, s2_bready, s2_arvalid, s2_arready, s2_rvalid, s2_rready;
 
-// ── Crossbar ──────────────────────────────────────────────────────────────────
+// ── Phase 3: AXI4 crossbar ────────────────────────────────────────────────────
 axi4_crossbar u_xbar (
     .clk(clk), .rst_n(rst_n),
     .m0_awaddr(m0_awaddr), .m0_awvalid(m0_awvalid), .m0_awready(m0_awready),
@@ -166,7 +242,7 @@ axi_sram u_sram1 (
     .s_rdata (s1_rdata),  .s_rresp  (s1_rresp),   .s_rvalid (s1_rvalid),  .s_rready(s1_rready)
 );
 
-// ── Slave 2: AI accelerator (0x5000_xxxx) ────────────────────────────────────
+// ── Phase 4: AI accelerator (0x5000_xxxx) ─────────────────────────────────────
 accel_top u_accel (
     .clk(clk), .rst_n(rst_n),
     .s_awaddr(s2_awaddr), .s_awvalid(s2_awvalid), .s_awready(s2_awready),
