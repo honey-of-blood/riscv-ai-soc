@@ -58,29 +58,42 @@ logic [31:0] addr_r;
 logic [31:0] wdata_r;
 logic  [3:0] wstrb_r;
 
+// Pulses for one cycle after a transaction completes.  During that cycle the
+// pipeline is un-stalled but the FSM is blocked from latching a new address —
+// this gives the pipeline flip-flops one full cycle to advance so the next
+// cpu_addr_i seen by the FSM belongs to the *next* instruction, not the one
+// that just completed.
+logic done_pulse;
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) done_pulse <= 1'b0;
+    else        done_pulse <= (state == RD_DATA && m_rvalid) ||
+                              (state == WR_RESP && m_bvalid);
+end
+
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        state      <= IDLE;
-        addr_r     <= '0;
-        wdata_r    <= '0;
-        wstrb_r    <= '0;
+        state       <= IDLE;
+        addr_r      <= '0;
+        wdata_r     <= '0;
+        wstrb_r     <= '0;
         cpu_rdata_o <= '0;
     end else begin
         case (state)
             IDLE: begin
-                if (cpu_we_i) begin
-                    addr_r  <= cpu_addr_i;
-                    wdata_r <= cpu_wdata_i;
-                    wstrb_r <= cpu_be_i;
-                    state   <= WR_ADDR;
-                end else if (cpu_re_i) begin
-                    addr_r  <= cpu_addr_i;
-                    state   <= RD_ADDR;
+                if (!done_pulse) begin
+                    if (cpu_we_i) begin
+                        addr_r  <= cpu_addr_i;
+                        wdata_r <= cpu_wdata_i;
+                        wstrb_r <= cpu_be_i;
+                        state   <= WR_ADDR;
+                    end else if (cpu_re_i) begin
+                        addr_r  <= cpu_addr_i;
+                        state   <= RD_ADDR;
+                    end
                 end
             end
 
             WR_ADDR: begin
-                // Deassert when both channels are accepted
                 if (m_awready && m_wready)
                     state <= WR_RESP;
             end
@@ -122,10 +135,10 @@ always_comb begin
     m_arvalid = (state == RD_ADDR);
     m_rready  = (state == RD_DATA);
 
-    // Stall only while the bus transaction is in flight.
-    // When state returns to IDLE the pipeline advances one cycle; any new
-    // memory access in the next MEM-stage instruction will restart a transaction.
-    cpu_stall_o = (state != IDLE);
+    // Stall while busy, and also on the cycle a new request arrives before
+    // the FSM has latched it (done_pulse=1 means we're in the settling cycle
+    // after completion — pipeline advances but FSM won't start yet).
+    cpu_stall_o = (state != IDLE) || ((cpu_re_i || cpu_we_i) && !done_pulse);
 end
 
 endmodule
