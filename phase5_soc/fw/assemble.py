@@ -4,8 +4,12 @@
 Test coverage (section by section):
   Section 1  : SRAM0 L1 cache — cold miss, write hits, read hits,
                dirty eviction (WRITE_BACK), post-eviction cold-miss fill
-  Section 1B : SRAM1 (crossbar slave 1) — cold miss, cache hit, dirty
-               eviction to SRAM1, post-eviction fill from SRAM1
+  Section 1B : APB bridge slave 1 (0x1000_xxxx) — cold miss, cache hit,
+               dirty eviction → WRITE_BACK through AXI-APB bridge,
+               post-eviction fill back from APB register file
+  Section 1C : APB bridge explicit round-trip — write unique sentinel to
+               0x1000_0020 (cache set 2), force eviction to commit it to
+               APB regs, read back via FILL from bridge → s0=0xC7
   Section 2  : First matmul (W = identity, A = [[1..4],..[13..16]]),
                CTRL start, CTRL.done poll, all 16 Y reads → SRAM store
   Section 3  : Second matmul (W = 2×identity, same A),
@@ -17,8 +21,9 @@ Register map at done time (checked by testbench):
   a1 = 0xCD  (SRAM0 cache hit)
   a2 = 0xEF  (SRAM0 cache hit)
   a3 = 0x12  (SRAM0 cache hit)
-  a4 = 0xA5  (SRAM1 cache hit  — proves slave 1 routing + fill)
-  a5 = 0xA5  (SRAM1 post-eviction read — proves WRITE_BACK to SRAM1 + refill)
+  a4 = 0xA5  (APB slave 1 cache hit — proves crossbar+bridge fill)
+  a5 = 0xA5  (APB slave 1 post-eviction read — proves WRITE_BACK+refill via bridge)
+  s0 = 0xC7  (APB explicit round-trip: write→evict→FILL from APB regs[8])
   a6 = 2     (2nd matmul Y[0][0] = 2*A[0][0] = 2*1)
   a7 = 32    (2nd matmul Y[3][3] = 2*A[3][3] = 2*16)
 """
@@ -61,6 +66,7 @@ def jal(rd, offset):
 # Register aliases
 x0=0; t0=5; t1=6; t2=7; t3=28; t4=29
 a0=10; a1=11; a2=12; a3=13; a4=14; a5=15; a6=16; a7=17
+s0=8
 
 def li32(rd, val):
     val = val & 0xFFFFFFFF
@@ -142,6 +148,29 @@ emit(sw  (t2, t3,  0  ))        # WRITE_BACK{0xA5}→SRAM1[0x1000_0000]; FILL{0x
 # 0x1000_0400 is now dirty(0xB6) → evict it first → WRITE_BACK to SRAM1[0x1000_0400]
 # Then FILL 0x1000_0000 from SRAM1 (which now holds 0xA5) → a5=0xA5
 emit(lw(a5, t4, 0))              # a5=0xA5 ← post-eviction fill from SRAM1
+
+# =============================================================================
+# SECTION 1C — APB bridge explicit round-trip (cache set 2)
+# =============================================================================
+# 0x1000_0020 → cache set = addr[9:4] = 0x020>>4 & 0x3F = 2
+# 0x1000_0420 → cache set = 0x420>>4 & 0x3F = 2  (same set, different tag → alias)
+# APB regs word index = paddr[10:2]:
+#   0x1000_0020 → idx=8,  0x1000_0420 → idx=264
+#
+# Step 1: SW 0xC7 → 0x1000_0020 (write miss → FILL from APB, then write hit → dirty)
+# Step 2: SW 0xD8 → 0x1000_0420 (evicts 0x1000_0020 → WRITE_BACK 0xC7 to APB regs[8])
+# Step 3: LW s0  ← 0x1000_0020 (evicts 0x1000_0420 → WRITE_BACK; FILL from APB → s0=0xC7)
+
+for w in li32(t3, 0x10000020): emit(w)  # t3 = 0x1000_0020
+emit(addi(t2, x0, 0xC7))                # t2 = 0xC7 (APB test sentinel)
+emit(sw  (t2, t3, 0))                   # cache write miss → FILL from APB, write 0xC7
+
+for w in li32(t3, 0x10000420): emit(w)  # t3 = 0x1000_0420 (alias: same set 2)
+emit(addi(t2, x0, 0xD8))                # different sentinel for alias line
+emit(sw  (t2, t3, 0))                   # evicts 0x1000_0020 line → WRITE_BACK 0xC7 → APB
+
+for w in li32(t3, 0x10000020): emit(w)  # t3 = 0x1000_0020 again
+emit(lw  (s0, t3, 0))                   # evicts 0x1000_0420, FILLs 0x1000_0020 from APB → s0=0xC7
 
 # =============================================================================
 # SECTION 2 — First matmul: W = identity, A = [[1..4],[5..8],[9..12],[13..16]]

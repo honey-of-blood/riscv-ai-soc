@@ -2,20 +2,20 @@
 // Phase 5 SoC top-level — all four phases integrated.
 //
 // Data path:
-//   riscv_core (Ph1) ─┬─ cacheable (0x0000_xxxx) ──→ cache_top (Ph2)
-//                     │                                    │ AXI4 burst
-//                     │                          axi4_burst_to_lite
-//                     │                                    │ AXI4-Lite
+//   riscv_core (Ph1) ─┬─ cacheable (0x0000_xxxx / 0x1000_xxxx) ──→ cache_top (Ph2)
+//                     │                                                  │ AXI4 burst
+//                     │                                        axi4_burst_to_lite
+//                     │                                                  │ AXI4-Lite
 //                     └─ MMIO (0x5000_xxxx) ──→ dmem_axi_adapter
 //                                                          │
 //                                             axi4_crossbar (Ph3) M0/M1
-//                                              ├── S0: axi_sram (data)
-//                                              ├── S1: axi_sram (placeholder)
-//                                              └── S2: accel_top (Ph4)
+//                                              ├── S0: axi_sram        (data)
+//                                              ├── S1: axi_apb_bridge → apb_regs
+//                                              └── S2: accel_top       (Ph4)
 //
 // Address map (crossbar decodes addr[31:16]):
-//   0x0000_xxxx → SRAM0  (64 KB data memory, cached)
-//   0x1000_xxxx → SRAM1  (placeholder)
+//   0x0000_xxxx → SRAM0         (64 KB data memory, cached)
+//   0x1000_xxxx → APB bridge    (APB register file, cached path)
 //   0x5000_xxxx → accel_top MMIO (non-cached, adapter bypass)
 
 module soc_top (
@@ -232,14 +232,32 @@ axi_sram u_sram0 (
     .s_rdata (s0_rdata),  .s_rresp  (s0_rresp),   .s_rvalid (s0_rvalid),  .s_rready(s0_rready)
 );
 
-// ── Slave 1: SRAM placeholder (0x1000_xxxx) ───────────────────────────────────
-axi_sram u_sram1 (
-    .clk(clk), .rst_n(rst_n),
-    .s_awaddr(s1_awaddr), .s_awvalid(s1_awvalid), .s_awready(s1_awready),
-    .s_wdata (s1_wdata),  .s_wstrb  (s1_wstrb),   .s_wvalid (s1_wvalid),  .s_wready(s1_wready),
-    .s_bresp (s1_bresp),  .s_bvalid (s1_bvalid),  .s_bready (s1_bready),
-    .s_araddr(s1_araddr), .s_arvalid(s1_arvalid), .s_arready(s1_arready),
-    .s_rdata (s1_rdata),  .s_rresp  (s1_rresp),   .s_rvalid (s1_rvalid),  .s_rready(s1_rready)
+// ── APB bus between bridge and register file ──────────────────────────────────
+logic [31:0] apb_paddr;
+logic        apb_psel, apb_penable, apb_pwrite;
+logic [31:0] apb_pwdata;
+logic  [3:0] apb_pstrb;
+logic [31:0] apb_prdata;
+logic        apb_pready, apb_pslverr;
+
+// ── Slave 1: AXI-APB bridge → APB register file (0x1000_xxxx) ────────────────
+axi_apb_bridge u_apb_bridge (
+    .clk      (clk),          .rst_n    (rst_n),
+    .s_awaddr (s1_awaddr),    .s_awvalid(s1_awvalid),   .s_awready(s1_awready),
+    .s_wdata  (s1_wdata),     .s_wstrb  (s1_wstrb),     .s_wvalid (s1_wvalid),  .s_wready(s1_wready),
+    .s_bresp  (s1_bresp),     .s_bvalid (s1_bvalid),    .s_bready (s1_bready),
+    .s_araddr (s1_araddr),    .s_arvalid(s1_arvalid),   .s_arready(s1_arready),
+    .s_rdata  (s1_rdata),     .s_rresp  (s1_rresp),     .s_rvalid (s1_rvalid),  .s_rready(s1_rready),
+    .p_paddr  (apb_paddr),    .p_psel   (apb_psel),     .p_penable(apb_penable),
+    .p_pwrite (apb_pwrite),   .p_pwdata (apb_pwdata),   .p_pstrb  (apb_pstrb),
+    .p_prdata (apb_prdata),   .p_pready (apb_pready),   .p_pslverr(apb_pslverr)
+);
+
+apb_regs u_apb_regs (
+    .clk      (clk),          .rst_n    (rst_n),
+    .p_paddr  (apb_paddr),    .p_psel   (apb_psel),     .p_penable(apb_penable),
+    .p_pwrite (apb_pwrite),   .p_pwdata (apb_pwdata),   .p_pstrb  (apb_pstrb),
+    .p_prdata (apb_prdata),   .p_pready (apb_pready),   .p_pslverr(apb_pslverr)
 );
 
 // ── Phase 4: AI accelerator (0x5000_xxxx) ─────────────────────────────────────

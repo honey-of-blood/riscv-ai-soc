@@ -30,7 +30,7 @@
 //    • Second matmul: W=2I, same A              → Y=2A (corner outputs a6,a7)
 //    • CTRL lifecycle: start, COMPUTE, done, restart
 //
-// Total checks: 44 (28 existing + 16 y_cap + 2 CPU regs)
+// Total checks: 46 (28 existing + 16 y_cap + 2 APB round-trip + 2 CPU regs a6/a7)
 // ============================================================================
 
 module soc_tb;
@@ -55,11 +55,11 @@ soc_top dut (.clk(clk), .rst_n(rst_n));
 always @(posedge clk)
     if (rst_n && dut.dmem_stall) stall_cycles++;
 
-// ── Done flag: infinite-loop JAL at PC=0x01c8 ────────────────────────────────
+// ── Done flag: infinite-loop JAL at PC=0x01f4 ────────────────────────────────
 logic done_flag;
 initial done_flag = 0;
 always @(posedge clk)
-    if (rst_n && dut.imem_addr == 32'h1c8)
+    if (rst_n && dut.imem_addr == 32'h1f4)
         done_flag <= 1;
 
 // ============================================================================
@@ -169,7 +169,7 @@ initial begin
     end
 
     if (!done_flag) begin
-        $display("[FAIL] TIMEOUT — firmware did not reach done sentinel PC=0x1c8");
+        $display("[FAIL] TIMEOUT — firmware did not reach done sentinel PC=0x1f4");
         error_count++;
         $finish;
     end
@@ -210,21 +210,31 @@ initial begin
     check("SRAM0 mem[3] = 0x12",                       dut.u_sram0.mem[3],   32'h12);
     check("SRAM0 mem[256]=0x55 (alias line WRITE_BACK)", dut.u_sram0.mem[256], 32'h55);
 
-    // ── Phase 2 + Phase 3: SRAM1 (slave 1) full round-trip ───────────────────
+    // ── Phase 2 + Phase 3: APB bridge (slave 1) full round-trip ──────────────
     $display("");
-    $display("─── Ph2+Ph3 : SRAM1 (slave 1) cache cold-miss + eviction + fill ");
-    check("a4 = LW SRAM1[0x1000_0000] cache hit (=0xA5)",
+    $display("─── Ph2+Ph3 : APB bridge (slave 1) cache cold-miss + eviction + fill ");
+    check("a4 = LW APB[0x1000_0000] cache hit (=0xA5)",
           dut.u_cpu.u_regfile.regs[14], 32'hA5);
-    check("a5 = post-eviction FILL from SRAM1 (=0xA5)",
+    check("a5 = post-eviction FILL from APB bridge (=0xA5)",
           dut.u_cpu.u_regfile.regs[15], 32'hA5);
 
-    // SRAM1 eviction on AXI write bus
+    // APB eviction on AXI write bus (crossbar s1 port, before bridge)
     if (!evict_sram1_valid) repeat(100) @(posedge clk);
-    check("evict SRAM1[0x1000_0000]=0xA5 on AXI bus", evict_sram1_data, 32'hA5);
+    check("evict APB[0x1000_0000]=0xA5 on AXI bus (s1 port)", evict_sram1_data, 32'hA5);
 
-    // SRAM1 hierarchy: word 0 = 0xA5 (committed by first eviction)
-    check("SRAM1 mem[0] = 0xA5 (eviction committed to slave 1)",
-          dut.u_sram1.mem[0], 32'hA5);
+    // APB regs hierarchy: word 0 = 0xA5 (committed by WRITE_BACK through bridge)
+    check("APB regs[0]=0xA5 (WRITE_BACK of 0x1000_0000 via AXI-APB bridge)",
+          dut.u_apb_regs.mem[0], 32'hA5);
+
+    // ── Phase 3: APB bridge explicit round-trip (cache set 2) ─────────────────
+    $display("");
+    $display("─── Ph3     : APB bridge round-trip (set 2: write → evict → FILL) ─");
+    // APB regs[8] written by WRITE_BACK of 0x1000_0020 (0xC7), then
+    // s0 loaded by FILL of 0x1000_0020 from APB regs[8].
+    check("APB regs[8]=0xC7 (WRITE_BACK of 0x1000_0020 through bridge)",
+          dut.u_apb_regs.mem[8], 32'hC7);
+    check("s0=0xC7 (APB round-trip: write→evict→FILL from APB bridge)",
+          dut.u_cpu.u_regfile.regs[8], 32'hC7);
 
     // ── Phase 4: first matmul — all 16 Y outputs (Y = A, W=identity) ─────────
     $display("");
@@ -269,8 +279,8 @@ initial begin
     $display("");
     if (error_count == 0) begin
         $display("╔══════════════════════════════════════════════════════════╗");
-        $display("║  ALL 44 CHECKS PASSED — Phase 5 integration complete    ║");
-        $display("║  Ph1 ✓  Ph2 ✓  Ph3 ✓  Ph4 ✓  — ready for Phase 6       ║");
+        $display("║  ALL 46 CHECKS PASSED — Phase 5 integration complete    ║");
+        $display("║  Ph1 ✓  Ph2 ✓  Ph3+APB ✓  Ph4 ✓  — ready for Phase 6   ║");
         $display("╚══════════════════════════════════════════════════════════╝");
     end else begin
         $display("╔══════════════════════════════════════════════════════════╗");

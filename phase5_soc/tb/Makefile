@@ -32,10 +32,12 @@ SRCS := $(PH1)/alu.sv \
         $(PH2)/cache_top.sv \
         $(PH3)/axi4_crossbar.sv \
         $(PH3)/axi_sram.sv \
+        $(PH3)/axi_apb_bridge.sv \
         $(PH4)/pe.sv \
         $(PH4)/systolic_array.sv \
         $(PH4)/accel_top.sv \
         $(RTL)/instr_rom.sv \
+        $(RTL)/apb_regs.sv \
         $(RTL)/dmem_axi_adapter.sv \
         $(RTL)/axi4_burst_to_lite.sv \
         $(RTL)/soc_top.sv \
