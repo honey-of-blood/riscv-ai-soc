@@ -21,7 +21,7 @@ module pipeline_reg_IF_ID (
 );
     localparam NOP = 32'h0000_0013; // ADDI x0, x0, 0
 
-    always_ff @(posedge clk or posedge rst) begin
+    always_ff @(posedge clk) begin
         if (rst || flush_i) begin
             pc_id_o    <= 32'b0;
             instr_id_o <= NOP;

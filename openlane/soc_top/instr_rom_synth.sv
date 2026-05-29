@@ -1,0 +1,142 @@
+`timescale 1ns/1ps
+// Synthesizable instruction ROM — generated from firmware.hex.
+// Do not edit; regenerate with gen_instr_rom.py.
+module instr_rom #(parameter DEPTH = 512)(
+    input  logic        clk,
+    input  logic [31:0] addr,
+    output logic [31:0] rdata
+);
+    logic [8:0] word_idx;
+    assign word_idx = addr[10:2];
+    always_comb begin
+        case (word_idx)
+            9'd0: rdata = 32'h0ab00393;
+            9'd1: rdata = 32'h00702023;
+            9'd2: rdata = 32'h0cd00393;
+            9'd3: rdata = 32'h00702223;
+            9'd4: rdata = 32'h0ef00393;
+            9'd5: rdata = 32'h00702423;
+            9'd6: rdata = 32'h01200393;
+            9'd7: rdata = 32'h00702623;
+            9'd8: rdata = 32'h00002503;
+            9'd9: rdata = 32'h00402583;
+            9'd10: rdata = 32'h00802603;
+            9'd11: rdata = 32'h00c02683;
+            9'd12: rdata = 32'h40000e13;
+            9'd13: rdata = 32'h05500393;
+            9'd14: rdata = 32'h007e2023;
+            9'd15: rdata = 32'h00002383;
+            9'd16: rdata = 32'h00702823;
+            9'd17: rdata = 32'h10000eb7;
+            9'd18: rdata = 32'h0a500393;
+            9'd19: rdata = 32'h007ea023;
+            9'd20: rdata = 32'h000ea703;
+            9'd21: rdata = 32'h400e8e13;
+            9'd22: rdata = 32'h0b600393;
+            9'd23: rdata = 32'h007e2023;
+            9'd24: rdata = 32'h000ea783;
+            9'd25: rdata = 32'h10000e37;
+            9'd26: rdata = 32'h020e0e13;
+            9'd27: rdata = 32'h0c700393;
+            9'd28: rdata = 32'h007e2023;
+            9'd29: rdata = 32'h10000e37;
+            9'd30: rdata = 32'h420e0e13;
+            9'd31: rdata = 32'h0d800393;
+            9'd32: rdata = 32'h007e2023;
+            9'd33: rdata = 32'h10000e37;
+            9'd34: rdata = 32'h020e0e13;
+            9'd35: rdata = 32'h000e2403;
+            9'd36: rdata = 32'h500002b7;
+            9'd37: rdata = 32'h00100313;
+            9'd38: rdata = 32'h0062a223;
+            9'd39: rdata = 32'h10000313;
+            9'd40: rdata = 32'h0062a423;
+            9'd41: rdata = 32'h00010337;
+            9'd42: rdata = 32'h0062a623;
+            9'd43: rdata = 32'h01000337;
+            9'd44: rdata = 32'h0062a823;
+            9'd45: rdata = 32'h04030337;
+            9'd46: rdata = 32'h20130313;
+            9'd47: rdata = 32'h0062aa23;
+            9'd48: rdata = 32'h08070337;
+            9'd49: rdata = 32'h60530313;
+            9'd50: rdata = 32'h0062ac23;
+            9'd51: rdata = 32'h0c0b1337;
+            9'd52: rdata = 32'ha0930313;
+            9'd53: rdata = 32'h0062ae23;
+            9'd54: rdata = 32'h100f1337;
+            9'd55: rdata = 32'he0d30313;
+            9'd56: rdata = 32'h0262a023;
+            9'd57: rdata = 32'h00100313;
+            9'd58: rdata = 32'h0062a023;
+            9'd59: rdata = 32'h0002a303;
+            9'd60: rdata = 32'h00237313;
+            9'd61: rdata = 32'hfe030ce3;
+            9'd62: rdata = 32'h0242a303;
+            9'd63: rdata = 32'h02602023;
+            9'd64: rdata = 32'h0282a303;
+            9'd65: rdata = 32'h02602223;
+            9'd66: rdata = 32'h02c2a303;
+            9'd67: rdata = 32'h02602423;
+            9'd68: rdata = 32'h0302a303;
+            9'd69: rdata = 32'h02602623;
+            9'd70: rdata = 32'h0342a303;
+            9'd71: rdata = 32'h02602823;
+            9'd72: rdata = 32'h0382a303;
+            9'd73: rdata = 32'h02602a23;
+            9'd74: rdata = 32'h03c2a303;
+            9'd75: rdata = 32'h02602c23;
+            9'd76: rdata = 32'h0402a303;
+            9'd77: rdata = 32'h02602e23;
+            9'd78: rdata = 32'h0442a303;
+            9'd79: rdata = 32'h04602023;
+            9'd80: rdata = 32'h0482a303;
+            9'd81: rdata = 32'h04602223;
+            9'd82: rdata = 32'h04c2a303;
+            9'd83: rdata = 32'h04602423;
+            9'd84: rdata = 32'h0502a303;
+            9'd85: rdata = 32'h04602623;
+            9'd86: rdata = 32'h0542a303;
+            9'd87: rdata = 32'h04602823;
+            9'd88: rdata = 32'h0582a303;
+            9'd89: rdata = 32'h04602a23;
+            9'd90: rdata = 32'h05c2a303;
+            9'd91: rdata = 32'h04602c23;
+            9'd92: rdata = 32'h0602a303;
+            9'd93: rdata = 32'h04602e23;
+            9'd94: rdata = 32'h00200313;
+            9'd95: rdata = 32'h0062a223;
+            9'd96: rdata = 32'h20000313;
+            9'd97: rdata = 32'h0062a423;
+            9'd98: rdata = 32'h00020337;
+            9'd99: rdata = 32'h0062a623;
+            9'd100: rdata = 32'h02000337;
+            9'd101: rdata = 32'h0062a823;
+            9'd102: rdata = 32'h00100313;
+            9'd103: rdata = 32'h0062a023;
+            9'd104: rdata = 32'h0002a303;
+            9'd105: rdata = 32'h00237313;
+            9'd106: rdata = 32'hfe030ce3;
+            9'd107: rdata = 32'h0242a303;
+            9'd108: rdata = 32'h0282a303;
+            9'd109: rdata = 32'h02c2a303;
+            9'd110: rdata = 32'h0302a303;
+            9'd111: rdata = 32'h0342a303;
+            9'd112: rdata = 32'h0382a303;
+            9'd113: rdata = 32'h03c2a303;
+            9'd114: rdata = 32'h0402a303;
+            9'd115: rdata = 32'h0442a303;
+            9'd116: rdata = 32'h0482a303;
+            9'd117: rdata = 32'h04c2a303;
+            9'd118: rdata = 32'h0502a303;
+            9'd119: rdata = 32'h0542a303;
+            9'd120: rdata = 32'h0582a303;
+            9'd121: rdata = 32'h05c2a303;
+            9'd122: rdata = 32'h0602a303;
+            9'd123: rdata = 32'h0242a803;
+            9'd124: rdata = 32'h0602a883;
+            9'd125: rdata = 32'h0000006f;
+            default: rdata = 32'h0000_0013; // NOP
+        endcase
+    end
+endmodule

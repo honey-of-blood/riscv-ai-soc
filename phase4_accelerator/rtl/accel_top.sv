@@ -109,13 +109,30 @@ module accel_top (
     );
 
     // ── FSM + output capture ──────────────────────────────────────────────────
+    // Sole owner of: state, cyc, done_r, start_r, y_reg.
+    // Reads wr_pending/wr_idx_r/wr_data_r/wr_strb_r from the AXI write block
+    // (registered values — no combinational loop).
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state   <= IDLE;
             cyc     <= 3'd0;
             done_r  <= 1'b0;
             start_r <= 1'b0;
+            y_reg[0][0] <= 32'h0; y_reg[0][1] <= 32'h0;
+            y_reg[0][2] <= 32'h0; y_reg[0][3] <= 32'h0;
+            y_reg[1][0] <= 32'h0; y_reg[1][1] <= 32'h0;
+            y_reg[1][2] <= 32'h0; y_reg[1][3] <= 32'h0;
+            y_reg[2][0] <= 32'h0; y_reg[2][1] <= 32'h0;
+            y_reg[2][2] <= 32'h0; y_reg[2][3] <= 32'h0;
+            y_reg[3][0] <= 32'h0; y_reg[3][1] <= 32'h0;
+            y_reg[3][2] <= 32'h0; y_reg[3][3] <= 32'h0;
         end else begin
+            // CTRL register write from AXI path (wr_pending is registered)
+            if (wr_pending && wr_idx_r == 6'd0 && wr_strb_r[0]) begin
+                start_r <= wr_data_r[0];
+                if (wr_data_r[0]) done_r <= 1'b0;
+            end
+
             case (state)
                 IDLE: begin
                     if (start_r) begin
@@ -184,7 +201,6 @@ module accel_top (
                 for (int j = 0; j < 4; j++) begin
                     w_reg[i][j] <= 8'h0;
                     a_reg[i][j] <= 8'h0;
-                    y_reg[i][j] <= 32'h0;
                 end
             end
         end else begin
@@ -201,13 +217,7 @@ module accel_top (
                 wr_pending <= 1'b0;
                 s_bvalid   <= 1'b1;
                 case (wr_idx_r)
-                    6'd0: begin // CTRL
-                        if (wr_strb_r[0]) begin
-                            start_r <= wr_data_r[0];
-                            // New start clears done
-                            if (wr_data_r[0]) done_r <= 1'b0;
-                        end
-                    end
+                    6'd0: ; // CTRL: start_r/done_r handled by FSM block
                     6'd1: begin // W_row0
                         if (wr_strb_r[0]) w_reg[0][0] <= wr_data_r[ 7: 0];
                         if (wr_strb_r[1]) w_reg[0][1] <= wr_data_r[15: 8];

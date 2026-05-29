@@ -55,7 +55,7 @@ module pipeline_reg_ID_EX (
     output logic [4:0]  rd_o
 );
 
-    always_ff @(posedge clk or posedge rst) begin
+    always_ff @(posedge clk) begin
         if (rst || flush_i) begin
             // NOP: zero all control signals; data values don't matter
             reg_write_o  <= 1'b0;

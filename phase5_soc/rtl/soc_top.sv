@@ -19,8 +19,9 @@
 //   0x5000_xxxx → accel_top MMIO (non-cached, adapter bypass)
 
 module soc_top (
-    input  logic clk,
-    input  logic rst_n
+    input  logic        clk,
+    input  logic        rst_n,
+    output logic [31:0] gpio_o   // observable output: keeps hierarchy alive for synthesis
 );
 
 // ── Instruction memory ────────────────────────────────────────────────────────
@@ -269,5 +270,7 @@ accel_top u_accel (
     .s_araddr(s2_araddr), .s_arvalid(s2_arvalid), .s_arready(s2_arready),
     .s_rdata (s2_rdata),  .s_rresp  (s2_rresp),   .s_rvalid (s2_rvalid),  .s_rready(s2_rready)
 );
+
+assign gpio_o = imem_addr;  // PC value — observable primary output for synthesis
 
 endmodule

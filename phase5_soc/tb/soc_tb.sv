@@ -49,7 +49,8 @@ initial begin
 end
 
 // ── DUT ────────────────────────────────────────────────────────────────────────
-soc_top dut (.clk(clk), .rst_n(rst_n));
+logic [31:0] gpio_nc; // synthesis observable output, not checked in sim
+soc_top dut (.clk(clk), .rst_n(rst_n), .gpio_o(gpio_nc));
 
 // ── Stall cycle counter ────────────────────────────────────────────────────────
 always @(posedge clk)

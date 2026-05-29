@@ -1,0 +1,44 @@
+{
+    "DESIGN_NAME": "soc_top",
+
+    "VERILOG_FILES": [
+        "dir::../../phase1_riscv_core/rtl/alu.sv",
+        "dir::../../phase1_riscv_core/rtl/reg_file.sv",
+        "dir::../../phase1_riscv_core/rtl/imm_gen.sv",
+        "dir::../../phase1_riscv_core/rtl/fetch_stage.sv",
+        "dir::../../phase1_riscv_core/rtl/pipeline_reg_IF_ID.sv",
+        "dir::../../phase1_riscv_core/rtl/decode_stage.sv",
+        "dir::../../phase1_riscv_core/rtl/pipeline_reg_ID_EX.sv",
+        "dir::../../phase1_riscv_core/rtl/execute_stage.sv",
+        "dir::../../phase1_riscv_core/rtl/pipeline_reg_EX_MEM.sv",
+        "dir::../../phase1_riscv_core/rtl/memory_stage.sv",
+        "dir::../../phase1_riscv_core/rtl/pipeline_reg_MEM_WB.sv",
+        "dir::../../phase1_riscv_core/rtl/writeback_stage.sv",
+        "dir::../../phase1_riscv_core/rtl/hazard_unit.sv",
+        "dir::../../phase1_riscv_core/rtl/forwarding_unit.sv",
+        "dir::../../phase1_riscv_core/rtl/riscv_core.sv",
+        "dir::../../phase2_cache/rtl/cache_tag_array.sv",
+        "dir::../../phase2_cache/rtl/cache_data_array.sv",
+        "dir::../../phase2_cache/rtl/cache_controller.sv",
+        "dir::../../phase2_cache/rtl/cache_top.sv",
+        "dir::../../phase3_axi/rtl/axi4_crossbar.sv",
+        "dir::axi_sram_synth.sv",
+        "dir::../../phase3_axi/rtl/axi_apb_bridge.sv",
+        "dir::accel_top_stub.sv",
+        "dir::../../phase5_soc/rtl/apb_regs.sv",
+        "dir::../../phase5_soc/rtl/dmem_axi_adapter.sv",
+        "dir::../../phase5_soc/rtl/axi4_burst_to_lite.sv",
+        "dir::instr_rom_synth.sv",
+        "dir::../../phase5_soc/rtl/soc_top.sv"
+    ],
+
+    "CLOCK_PORT": "clk",
+    "CLOCK_PERIOD": 15,
+
+    "FP_CORE_UTIL": 20,
+    "PL_TARGET_DENSITY_PCT": 25,
+    "SYNTH_STRATEGY": "AREA 0",
+    "RUN_LINTER": false,
+    "GRT_ALLOW_CONGESTION": true,
+    "DRT_OPT_ITERS": 5
+}

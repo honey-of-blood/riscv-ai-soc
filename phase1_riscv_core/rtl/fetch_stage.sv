@@ -32,10 +32,11 @@ module fetch_stage (
             pc_next = pc + 32'd4;
     end
 
-    // PC register — stall holds, reset to 0
-    always_ff @(posedge clk or posedge rst) begin
-        if (rst)         pc <= 32'b0;
-        else if (!stall_i) pc <= pc_next;
+    // PC register — stall holds, reset to 0.
+    // Synchronous reset avoids Yosys proc_arst failures with self-referential else branch.
+    always_ff @(posedge clk) begin
+        if (rst) pc <= 32'b0;
+        else     pc <= stall_i ? pc : pc_next;
     end
 
     // Drive instruction memory with current PC
