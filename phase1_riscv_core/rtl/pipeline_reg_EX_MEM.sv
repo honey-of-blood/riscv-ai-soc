@@ -37,7 +37,7 @@ module pipeline_reg_EX_MEM (
     output logic [4:0]  rd_o
 );
 
-    always_ff @(posedge clk or posedge rst) begin
+    always_ff @(posedge clk) begin
         if (rst) begin
             alu_result_o <= 32'b0;
             rs2_data_o   <= 32'b0;

@@ -31,7 +31,7 @@ module pipeline_reg_MEM_WB (
     output logic [4:0]  rd_o
 );
 
-    always_ff @(posedge clk or posedge rst) begin
+    always_ff @(posedge clk) begin
         if (rst) begin
             alu_result_o <= 32'b0;
             mem_rdata_o  <= 32'b0;
