@@ -1,3 +1,0 @@
-Vcrossbar_accel_tb___024root__DepSet_h391e4866__0.o: \
- Vcrossbar_accel_tb___024root__DepSet_h391e4866__0.cpp \
- Vcrossbar_accel_tb__pch.h Vcrossbar_accel_tb___024root.h
