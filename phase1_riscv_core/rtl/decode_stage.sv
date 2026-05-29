@@ -33,7 +33,8 @@ module decode_stage (
     output logic        branch_o,       // is a branch instruction
     output logic        jump_o,         // is JAL or JALR
     output logic [3:0]  alu_ctrl_o,     // ALU operation (matches alu.sv encodings)
-    output logic [1:0]  wb_sel_o        // writeback mux: 00=ALU 01=MEM 10=PC+4 11=IMM
+    output logic [1:0]  wb_sel_o,       // writeback mux: 00=ALU 01=MEM 10=PC+4 11=IMM
+    output logic        is_mext_o       // RV32IM M-extension instruction (funct7=0000001)
 );
 
     // -------------------------------------------------------------------------
@@ -73,6 +74,7 @@ module decode_stage (
     logic [6:0] opcode;
     logic [4:0] rs1, rs2, rd;
     logic [2:0] funct3;
+    logic [6:0] funct7;
     logic       funct7_5;   // instr[30]: ADD/SUB and SRL/SRA disambiguation
 
     assign opcode   = instr_i[6:0];
@@ -80,6 +82,7 @@ module decode_stage (
     assign funct3   = instr_i[14:12];
     assign rs1      = instr_i[19:15];
     assign rs2      = instr_i[24:20];
+    assign funct7   = instr_i[31:25];
     assign funct7_5 = instr_i[30];
 
     // -------------------------------------------------------------------------
@@ -114,10 +117,12 @@ module decode_stage (
         branch_o    = 1'b0;
         jump_o      = 1'b0;
         wb_sel_o    = WB_ALU;
+        is_mext_o   = 1'b0;
 
         case (opcode)
             OP_R:     begin
                 reg_write_o = 1'b1;
+                is_mext_o   = (funct7 == 7'b000_0001);
             end
             OP_IMM:   begin
                 reg_write_o = 1'b1;

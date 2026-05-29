@@ -52,7 +52,11 @@ module pipeline_reg_ID_EX (
 
     output logic [4:0]  rs1_o,
     output logic [4:0]  rs2_o,
-    output logic [4:0]  rd_o
+    output logic [4:0]  rd_o,
+
+    // M-extension passthrough
+    input  logic        is_mext_i,
+    output logic        is_mext_o
 );
 
     always_ff @(posedge clk) begin
@@ -75,6 +79,7 @@ module pipeline_reg_ID_EX (
             rs1_o        <= 5'b0;
             rs2_o        <= 5'b0;
             rd_o         <= 5'b0;
+            is_mext_o    <= 1'b0;
         end else if (!stall_i) begin
             reg_write_o  <= reg_write_i;
             mem_read_o   <= mem_read_i;
@@ -93,6 +98,7 @@ module pipeline_reg_ID_EX (
             rs1_o        <= rs1_i;
             rs2_o        <= rs2_i;
             rd_o         <= rd_i;
+            is_mext_o    <= is_mext_i;
         end
     end
 

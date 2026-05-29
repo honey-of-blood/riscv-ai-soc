@@ -1,12 +1,13 @@
 `timescale 1ns/1ps
 
-// RV32I 5-stage pipeline: IF → ID → EX → MEM → WB
+// RV32IM 5-stage pipeline: IF → ID → EX → MEM → WB
 // Harvard memory model: separate instruction and data ports.
 // Hazard handling:
 //   - Load-use:      1-cycle stall (PC + IF/ID hold; ID/EX NOP bubble)
 //   - Branch/jump:   2-cycle flush (IF/ID + ID/EX squashed; static not-taken)
 //   - RAW dist-1/2:  resolved by forwarding unit (EX/MEM→EX, MEM/WB→EX)
 //   - RAW dist-3:    resolved by write-before-read in reg_file
+//   - M-ext divide:  32-cycle stall (whole pipeline frozen via hazard_unit)
 module riscv_core (
     input  logic        clk,
     input  logic        rst,
@@ -34,6 +35,13 @@ module riscv_core (
     // Hazard unit outputs
     logic stall_if, stall_id, flush_id, flush_ex;
     logic stall_id_ex, stall_ex_mem, stall_mem_wb;
+
+    // M-extension signals
+    logic        is_mext_d, is_mext_e;
+    logic        mext_counting, mext_stall, mext_prev_stall, mext_start;
+    logic        is_div_in_ex;
+    logic [31:0] mext_result;
+    logic [31:0] ex_rs1_fwd;  // ex_rs2_fwd declared below with other EX-stage wires
 
     // Branch/jump resolution from execute stage → fetch stage + hazard unit
     logic        branch_taken;
@@ -136,7 +144,8 @@ module riscv_core (
         .branch_o    (branch_d),
         .jump_o      (jump_d),
         .alu_ctrl_o  (alu_ctrl_d),
-        .wb_sel_o    (wb_sel_d)
+        .wb_sel_o    (wb_sel_d),
+        .is_mext_o   (is_mext_d)
     );
 
     // =========================================================================
@@ -188,7 +197,9 @@ module riscv_core (
         .pc_o        (pc_e),
         .rs1_o       (rs1_e),
         .rs2_o       (rs2_e),
-        .rd_o        (rd_e)
+        .rd_o        (rd_e),
+        .is_mext_i   (is_mext_d),
+        .is_mext_o   (is_mext_e)
     );
 
     // =========================================================================
@@ -261,7 +272,8 @@ module riscv_core (
         .funct3_o        (ex_funct3),
         .rd_o            (ex_rd),
         .branch_taken_o  (branch_taken),
-        .branch_target_o (branch_target)
+        .branch_target_o (branch_target),
+        .rs1_fwd_o       (ex_rs1_fwd)
     );
 
     // =========================================================================
@@ -274,6 +286,7 @@ module riscv_core (
         .rs2_id_i       (rs2_d),
         .branch_taken_i (branch_taken),
         .cache_stall_i  (dmem_stall_i),
+        .mext_stall_i   (mext_stall),
         .stall_if_o     (stall_if),
         .stall_id_o     (stall_id),
         .stall_id_ex_o  (stall_id_ex),
@@ -284,19 +297,54 @@ module riscv_core (
     );
 
     // =========================================================================
+    // M-extension unit
+    // mext_start: 1-cycle pulse on the first active cycle of an M-ext instr in EX.
+    // mext_prev_stall guards against re-firing on the cycle immediately after
+    // mext_stall de-asserts (instruction still in EX but result already valid).
+    // =========================================================================
+    always_ff @(posedge clk) begin
+        if (rst) mext_prev_stall <= 1'b0;
+        else     mext_prev_stall <= mext_stall;
+    end
+
+    // mext_stall is combinational: asserts immediately the SAME cycle a DIV enters EX
+    // so the pipeline sees stall=1 at the posedge before it advances.
+    // mext_counting is the registered output from mext_unit (one cycle late for first cycle).
+    assign is_div_in_ex = is_mext_e && funct3_e[2];
+    assign mext_stall   = mext_counting || (is_div_in_ex && !mext_counting && !mext_prev_stall && !dmem_stall_i);
+    assign mext_start   = is_mext_e && !mext_counting && !mext_prev_stall && !dmem_stall_i;
+
+    mext_unit u_mext (
+        .clk      (clk),
+        .rst      (rst),
+        .rs1_i    (ex_rs1_fwd),
+        .rs2_i    (ex_rs2_fwd),
+        .funct3_i (funct3_e),
+        .start_i  (mext_start),
+        .result_o (mext_result),
+        .stall_o  (mext_counting)
+    );
+
+    // =========================================================================
     // EX/MEM pipeline register
     // (alu_result_m, reg_write_m, rd_m declared at top for forwarding unit)
+    // Mux: M-ext result replaces ALU result when instruction is M-ext.
+    // wb_sel stays WB_ALU so the WB stage selects alu_result_m (which carries
+    // the mext result) without any further changes.
     // =========================================================================
     logic [31:0] rs2_data_m, pc_plus4_m, imm_m;
     logic        mem_read_m, mem_write_m;
     logic [1:0]  wb_sel_m;
     logic [2:0]  funct3_m;
 
+    logic [31:0] ex_result;
+    assign ex_result = is_mext_e ? mext_result : ex_alu_result;
+
     pipeline_reg_EX_MEM u_ex_mem (
         .clk          (clk),
         .rst          (rst),
         .stall_i      (stall_ex_mem),
-        .alu_result_i (ex_alu_result),
+        .alu_result_i (ex_result),
         .rs2_data_i   (ex_rs2_fwd),
         .pc_plus4_i   (ex_pc_plus4),
         .imm_i        (ex_imm),

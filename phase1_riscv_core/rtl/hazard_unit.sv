@@ -34,6 +34,9 @@ module hazard_unit (
     // Cache-miss stall from L1 cache (cpu_stall_o)
     input  logic        cache_stall_i,
 
+    // M-extension divide stall (32-cycle operation in EX stage)
+    input  logic        mext_stall_i,
+
     // --- Stall outputs ---
     output logic        stall_if_o,      // → fetch_stage.stall_i         (hold PC)
     output logic        stall_id_o,      // → pipeline_reg_IF_ID.stall_i  (hold IF/ID)
@@ -47,20 +50,24 @@ module hazard_unit (
 );
 
     logic load_use;
+    logic pipe_stall;  // any whole-pipeline stall (cache miss or M-ext divide)
 
     // Load-use: rd_ex must be non-zero and match either source of the ID instruction
     assign load_use = mem_read_ex_i
                     && (rd_ex_i != 5'b0)
                     && ((rd_ex_i == rs1_id_i) || (rd_ex_i == rs2_id_i));
 
-    // Cache miss: freeze the whole pipeline; suppress flushes so a branch
-    // sitting in EX doesn't corrupt frozen IF/ID / ID/EX — it fires on resume.
-    assign stall_if_o     = load_use || cache_stall_i;
-    assign stall_id_o     = load_use || cache_stall_i;
-    assign stall_id_ex_o  = cache_stall_i;
-    assign stall_ex_mem_o = cache_stall_i;
-    assign stall_mem_wb_o = cache_stall_i;
-    assign flush_id_o     = branch_taken_i && !cache_stall_i;
-    assign flush_ex_o     = (load_use || branch_taken_i) && !cache_stall_i;
+    // Whole-pipeline stall: cache miss OR M-ext divide (both freeze all stages)
+    assign pipe_stall = cache_stall_i || mext_stall_i;
+
+    // Suppress flushes during any whole-pipeline stall so a branch sitting in EX
+    // does not corrupt frozen IF/ID / ID/EX — the flush fires on resume.
+    assign stall_if_o     = load_use || pipe_stall;
+    assign stall_id_o     = load_use || pipe_stall;
+    assign stall_id_ex_o  = pipe_stall;
+    assign stall_ex_mem_o = pipe_stall;
+    assign stall_mem_wb_o = pipe_stall;
+    assign flush_id_o     = branch_taken_i && !pipe_stall;
+    assign flush_ex_o     = (load_use || branch_taken_i) && !pipe_stall;
 
 endmodule

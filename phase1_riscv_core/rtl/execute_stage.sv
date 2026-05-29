@@ -44,7 +44,10 @@ module execute_stage (
 
     // Branch/jump resolution — wired back to fetch stage
     output logic        branch_taken_o,
-    output logic [31:0] branch_target_o
+    output logic [31:0] branch_target_o,
+
+    // Forwarded operands exposed for M-extension unit (in riscv_core)
+    output logic [31:0] rs1_fwd_o
 );
 
     // -------------------------------------------------------------------------
@@ -131,6 +134,7 @@ module execute_stage (
     // -------------------------------------------------------------------------
     assign alu_result_o = alu_result;
     assign rs2_fwd_o    = rs2_fwd;
+    assign rs1_fwd_o    = rs1_fwd;
     assign pc_plus4_o   = pc_i + 32'd4;
     assign imm_o        = imm_i;
     assign reg_write_o  = reg_write_i;
