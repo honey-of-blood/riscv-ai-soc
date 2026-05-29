@@ -25,6 +25,7 @@ SRCS := $(PH1)/alu.sv \
         $(PH1)/writeback_stage.sv \
         $(PH1)/hazard_unit.sv \
         $(PH1)/forwarding_unit.sv \
+        $(PH1)/mext_unit.sv \
         $(PH1)/riscv_core.sv \
         $(PH2)/cache_tag_array.sv \
         $(PH2)/cache_data_array.sv \
