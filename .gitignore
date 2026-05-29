@@ -21,6 +21,15 @@ openlane/*/runs/
 # SymbiYosys
 */formal/*/
 
+# Verilator build outputs
+**/build/
+**/build_dbg/
+**/build_opt/
+
+# Compiled simulation binaries
+**/tb/dff_sim
+**/tb/build/firmware.dump
+
 # Editor
 .vscode/
 *.swp

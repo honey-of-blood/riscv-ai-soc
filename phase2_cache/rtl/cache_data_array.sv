@@ -20,22 +20,25 @@ module cache_data_array (
     output logic [31:0] word3_o      // line word 3
 );
 
-    logic [31:0] mem [0:63][0:3];    // mem[set][word]
+    // Flat 1-D array: 64 sets × 4 words = 256 entries.
+    // Read-modify-write with a 32-bit byte-enable mask gives Yosys a single
+    // $proc → single $memwr cell, avoiding the "Multiple edge sensitive events"
+    // error that occurs when multiple conditional writes share an address net.
+    logic [31:0] mem [0:255];
 
-    // Byte-enable write — bit-selects inside always_ff are fine in Icarus
+    logic [31:0] be_mask;
+    assign be_mask = {{8{be_i[3]}}, {8{be_i[2]}}, {8{be_i[1]}}, {8{be_i[0]}}};
+
     always_ff @(posedge clk) begin : data_write
-        if (we_i) begin
-            if (be_i[0]) mem[idx_i][word_i][ 7: 0] <= wdata_i[ 7: 0];
-            if (be_i[1]) mem[idx_i][word_i][15: 8] <= wdata_i[15: 8];
-            if (be_i[2]) mem[idx_i][word_i][23:16] <= wdata_i[23:16];
-            if (be_i[3]) mem[idx_i][word_i][31:24] <= wdata_i[31:24];
-        end
+        if (we_i)
+            mem[{idx_i,word_i}] <= (mem[{idx_i,word_i}] & ~be_mask)
+                                 | (wdata_i & be_mask);
     end
 
-    // Asynchronous read of all four words
-    assign word0_o = mem[idx_i][0];
-    assign word1_o = mem[idx_i][1];
-    assign word2_o = mem[idx_i][2];
-    assign word3_o = mem[idx_i][3];
+    // Asynchronous read of all four words in the indexed set
+    assign word0_o = mem[{idx_i, 2'b00}];
+    assign word1_o = mem[{idx_i, 2'b01}];
+    assign word2_o = mem[{idx_i, 2'b10}];
+    assign word3_o = mem[{idx_i, 2'b11}];
 
 endmodule

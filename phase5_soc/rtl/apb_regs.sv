@@ -28,13 +28,12 @@ initial begin
     for (int i = 0; i < 512; i++) mem[i] = 32'h0;
 end
 
+logic [31:0] strb_mask;
+assign strb_mask = {{8{p_pstrb[3]}}, {8{p_pstrb[2]}}, {8{p_pstrb[1]}}, {8{p_pstrb[0]}}};
+
 always_ff @(posedge clk) begin
-    if (p_psel && p_penable && p_pwrite) begin
-        if (p_pstrb[0]) mem[widx][ 7: 0] <= p_pwdata[ 7: 0];
-        if (p_pstrb[1]) mem[widx][15: 8] <= p_pwdata[15: 8];
-        if (p_pstrb[2]) mem[widx][23:16] <= p_pwdata[23:16];
-        if (p_pstrb[3]) mem[widx][31:24] <= p_pwdata[31:24];
-    end
+    if (p_psel && p_penable && p_pwrite)
+        mem[widx] <= (mem[widx] & ~strb_mask) | (p_pwdata & strb_mask);
 end
 
 assign p_prdata  = mem[p_paddr[10:2]];
