@@ -23,11 +23,15 @@ RISC-V Core → L1 Cache → AXI4 Interconnect → AI Accelerator → Full Integ
 
 ![soc_top GDSII layout on Sky130A](docs/soc_gds.png)
 
-> Rendered from `openlane/soc_top/runs/RUN_2026-05-27_15-46-53/`.
+> Density heatmap rendered from `openlane/soc_top/runs/RUN_2026-05-27_15-46-53/53-klayout-streamout/soc_top.klayout.gds`
+> using klayout.db + scipy (area-weighted histogram per layer, per-layer Gaussian blur).
+> Layers: li1 (purple) → met1 (blue) → met2 (red) → met3 (teal) → met4 (yellow) → met5 (magenta).
+> Horizontal yellow band = met4 power stripe; magenta dots = met5 vertical power rails;
+> blue vertical feature = clock/power distribution trunk. 3103×3114 µm die.
 > Full SoC synthesis (146K cells) exceeds Sky130's 5-metal routing capacity;
-> layout above shows RV32I core + L1 cache + AXI4 crossbar + APB (134K cells,
-> accelerator blackboxed). Routing DRC violations present due to 2.15× congestion
-> overflow on met1–met5 — a known limitation of complex multi-bus SoCs on this process node.
+> layout shows RV32I core + L1 cache + AXI4 crossbar + APB (134K cells, accelerator blackboxed).
+> Routing DRC violations present due to 2.15× congestion overflow — a known limitation of
+> complex multi-bus SoCs on this process node.
 
 ## Architecture
 
