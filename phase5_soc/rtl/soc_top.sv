@@ -80,7 +80,7 @@ riscv_core u_cpu (
 
 // ── Address routing: cache vs MMIO bypass ────────────────────────────────────
 logic is_mmio;
-assign is_mmio = (dmem_addr[31:16] == 16'h5000);
+assign is_mmio = (dmem_addr[31:16] == 16'h1000) | (dmem_addr[31:16] == 16'h5000);
 
 logic cpu_cache_re, cpu_cache_we;
 logic cpu_mmio_re,  cpu_mmio_we;
