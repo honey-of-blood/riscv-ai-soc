@@ -14,9 +14,19 @@ ACCEL_SRCS := $(PH4)/pe.sv \
 
 DMA_SRCS   := $(RTL)/dma.sv
 
-.PHONY: all accel dma run_accel run_dma waves_accel waves_dma clean
+SP_SRCS    := $(RTL)/scratchpad.sv
 
-all: accel dma
+.PHONY: all accel dma scratchpad run_accel run_dma run_scratchpad \
+        waves_accel waves_dma waves_scratchpad clean
+
+all: scratchpad accel dma
+
+scratchpad: $(BUILD)/scratchpad_tb
+$(BUILD)/scratchpad_tb:
+	mkdir -p $(BUILD)
+	verilator $(VFLAGS) --top-module scratchpad_tb \
+	    -o scratchpad_tb --Mdir $(BUILD) \
+	    $(SP_SRCS) scratchpad_tb.sv $(abspath scratchpad_main.cpp)
 
 accel: $(BUILD)/accel_v2_tb
 $(BUILD)/accel_v2_tb:
@@ -32,11 +42,18 @@ $(BUILD)/dma_tb:
 	    -o dma_tb --Mdir $(BUILD) \
 	    $(DMA_SRCS) dma_tb.sv $(abspath dma_main.cpp)
 
+run_scratchpad: $(BUILD)/scratchpad_tb
+	./$(BUILD)/scratchpad_tb
+
 run_accel: $(BUILD)/accel_v2_tb
 	./$(BUILD)/accel_v2_tb
 
 run_dma: $(BUILD)/dma_tb
 	./$(BUILD)/dma_tb
+
+waves_scratchpad: $(BUILD)/scratchpad_tb
+	./$(BUILD)/scratchpad_tb --fst $(BUILD)/scratchpad.fst
+	gtkwave $(BUILD)/scratchpad.fst &
 
 waves_accel: $(BUILD)/accel_v2_tb
 	./$(BUILD)/accel_v2_tb --fst $(BUILD)/accel_v2.fst

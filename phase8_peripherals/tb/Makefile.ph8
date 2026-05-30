@@ -4,6 +4,7 @@ PH3   := ../../../phase3_axi/rtl
 PH4   := ../../../phase4_accelerator/rtl
 PH5   := ../../../phase5_soc/rtl
 PH8   := ../../rtl
+PH9   := ../../../phase9_accel_v2/rtl
 FW    := ../sw/fw_hello
 BUILD := ./build_ph8
 
@@ -36,8 +37,10 @@ SRCS := $(PH1)/alu.sv \
         $(PH3)/axi_sram.sv \
         $(PH3)/axi_apb_bridge.sv \
         $(PH4)/pe.sv \
-        $(PH4)/systolic_array.sv \
-        $(PH4)/accel_top.sv \
+        $(PH9)/systolic_array.sv \
+        $(PH9)/scratchpad.sv \
+        $(PH9)/accel_top_v2.sv \
+        $(PH9)/dma.sv \
         $(PH5)/instr_rom.sv \
         $(PH5)/apb_regs.sv \
         $(PH5)/dmem_axi_adapter.sv \
