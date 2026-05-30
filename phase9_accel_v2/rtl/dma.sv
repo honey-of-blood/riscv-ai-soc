@@ -114,9 +114,11 @@ module dma (
     assign irq_ch1 = done[1] & irq_en[1];
 
     // ── DMA transfer FSM ──────────────────────────────────────────────────
-    // Each channel proceeds: IDLE → READ → WRITE → (repeat or DONE)
+    // AW and W are issued simultaneously so the slave sees both valid in the
+    // same cycle — required by slaves that check (awvalid && wvalid) together
+    // (AXI4-Lite allows this and our scratchpad requires it).
     typedef enum logic [2:0] {
-        IDLE, ARB, READ_ADDR, READ_DATA, WRITE_ADDR, WRITE_DATA, WRITE_RESP
+        IDLE, ARB, READ_ADDR, READ_DATA, WRITE, WRITE_RESP
     } dma_state_t;
     dma_state_t dstate;
 
@@ -128,13 +130,13 @@ module dma (
     logic [31:0] ch_dst_r [0:1];
     logic [31:0] ch_len_r [0:1];  // remaining bytes during transfer
 
-    // AXI master outputs default
+    // AXI master outputs — AW and W driven simultaneously in WRITE state
     always_comb begin
         m_awaddr  = cur_dst;
-        m_awvalid = (dstate == WRITE_ADDR);
+        m_awvalid = (dstate == WRITE);
         m_wdata   = read_buf;
         m_wstrb   = 4'hF;
-        m_wvalid  = (dstate == WRITE_DATA);
+        m_wvalid  = (dstate == WRITE);
         m_bready  = (dstate == WRITE_RESP);
         m_araddr  = cur_src;
         m_arvalid = (dstate == READ_ADDR);
@@ -202,15 +204,11 @@ module dma (
             READ_DATA: begin
                 if (m_rvalid) begin
                     read_buf <= m_rdata;
-                    dstate   <= WRITE_ADDR;
+                    dstate   <= WRITE;
                 end
             end
 
-            WRITE_ADDR: if (m_awready) dstate <= WRITE_DATA;
-
-            WRITE_DATA: begin
-                if (m_wready) dstate <= WRITE_RESP;
-            end
+            WRITE: if (m_awready && m_wready) dstate <= WRITE_RESP;
 
             WRITE_RESP: begin
                 if (m_bvalid) begin

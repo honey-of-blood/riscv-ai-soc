@@ -402,14 +402,15 @@ clint u_clint (
     .msip_o        (m_sw_irq)
 );
 
-// ── PLIC (0x1000_6xxx) — sources include DMA ch0/ch1 done (Phase 9) ──────────
-logic dma_irq_ch0, dma_irq_ch1;
+// ── PLIC (0x1000_6xxx) — 8 sources: uart_rx[0] uart_tx[1] gpio[2] timer[3]
+//    dma_ch0[4] dma_ch1[5] accel_done[6] (bit7 reserved) ──────────────────────
+logic dma_irq_ch0, dma_irq_ch1, accel_irq_done;
 plic u_plic (
     .clk      (clk),       .rst_n  (rst_n),
     .paddr    (plic_paddr),.psel   (plic_psel),   .penable(plic_pen),
     .pwrite   (plic_pwrite),.pwdata(plic_pwdata), .prdata (plic_prdata),
     .pready   (plic_pready),
-    .irq_src  ({2'b0, dma_irq_ch1, dma_irq_ch0,
+    .irq_src  ({1'b0, accel_irq_done, dma_irq_ch1, dma_irq_ch0,
                 timer_mtip, gpio_irq, uart_irq_tx, uart_irq_rx}),
     .m_ext_irq(m_ext_irq)
 );
@@ -441,7 +442,7 @@ accel_top_v2 #(.N(4)) u_accel (
     .s_bresp (s2_bresp),  .s_bvalid (s2_bvalid),  .s_bready (s2_bready),
     .s_araddr(s2_araddr), .s_arvalid(s2_arvalid), .s_arready(s2_arready),
     .s_rdata (s2_rdata),  .s_rresp  (s2_rresp),   .s_rvalid (s2_rvalid),  .s_rready(s2_rready),
-    .irq_done ()
+    .irq_done (accel_irq_done)
 );
 
 assign pc_obs_o = imem_addr;

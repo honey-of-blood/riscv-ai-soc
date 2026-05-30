@@ -109,13 +109,19 @@ module dma_tb;
         end
     end
 
-    // AXI write responder
-    logic [31:0] aw_addr_lat = 0;
+    // AXI write responder — handles simultaneous AW+W (DMA now issues both together)
+    // and also sequential AW then W for general correctness.
+    logic [31:0] aw_addr_lat  = 0;
     logic        aw_lat_valid = 0;
+
+    // Combinational: effective address/valid covers both simultaneous and latched cases
+    wire [31:0] eff_aw_addr  = (m_awvalid && !m_awready) ? m_awaddr : aw_addr_lat;
+    wire        eff_aw_valid = aw_lat_valid | (m_awvalid & ~m_awready);
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             m_awready <= 0; m_wready <= 0; m_bvalid <= 0;
+            aw_addr_lat <= 0; aw_lat_valid <= 0;
         end else begin
             if (m_awvalid && !m_awready) begin
                 m_awready   <= 1;
@@ -125,11 +131,11 @@ module dma_tb;
 
             if (m_wvalid && !m_wready) begin
                 m_wready <= 1;
-                if (aw_lat_valid) begin
-                    if (aw_addr_lat >= 32'h2000 && aw_addr_lat < 32'h3000)
-                        dst0_mem[(aw_addr_lat - 32'h2000) >> 2] <= m_wdata;
-                    else if (aw_addr_lat >= 32'h4000 && aw_addr_lat < 32'h5000)
-                        dst1_mem[(aw_addr_lat - 32'h4000) >> 2] <= m_wdata;
+                if (eff_aw_valid) begin
+                    if (eff_aw_addr >= 32'h2000 && eff_aw_addr < 32'h3000)
+                        dst0_mem[(eff_aw_addr - 32'h2000) >> 2] <= m_wdata;
+                    else if (eff_aw_addr >= 32'h4000 && eff_aw_addr < 32'h5000)
+                        dst1_mem[(eff_aw_addr - 32'h4000) >> 2] <= m_wdata;
                     aw_lat_valid <= 0;
                 end
             end else m_wready <= 0;
