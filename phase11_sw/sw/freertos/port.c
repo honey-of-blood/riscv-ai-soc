@@ -91,10 +91,11 @@ StackType_t *pxPortInitialiseStack(StackType_t *pxTopOfStack,
     for (int i = 2; i < PORT_CONTEXT_WORDS; i++)
         pxTopOfStack[i] = 0u;
 
-    /* x10 (a0) = task parameter (frame index: mstatus=0, mepc=1, x1=2,
-       then registers follow in the order stored by portSAVE_CONTEXT).
-       In our layout, x10 is at index 10 (after mstatus,mepc,x1,t0-t2,s0,s1). */
-    pxTopOfStack[10] = (StackType_t)(uintptr_t)pvParameters;
+    /* x10 (a0) = task parameter.
+       Frame layout (byte offsets match vPortTrapHandler save sequence):
+         [0]=mstatus [1]=mepc [2]=x1 [3]=x5 [4]=x6 [5]=x7 [6]=x8 [7]=x9
+         [8]=x10 ← a0 / pvParameters                                       */
+    pxTopOfStack[8] = (StackType_t)(uintptr_t)pvParameters;
 
     return pxTopOfStack;
 }
@@ -194,7 +195,7 @@ __attribute__((naked)) void vPortTrapHandler(void)
 {
     __asm__ volatile (
         /* ── Save context ─────────────────────────────────────────── */
-        "addi sp, sp, -(30*4)   \n"     /* allocate frame (30 words)      */
+        "addi sp, sp, -(32*4)   \n"     /* allocate frame (32 words)      */
         /* mstatus and mepc */
         "csrr t0, mstatus       \n"
         "sw   t0,  0(sp)        \n"
@@ -294,7 +295,7 @@ __attribute__((naked)) void vPortTrapHandler(void)
         "lw  x29,108(sp)        \n"
         "lw  x30,112(sp)        \n"
         "lw  x31,116(sp)        \n"
-        "addi sp, sp, (30*4)    \n"     /* deallocate frame                  */
+        "addi sp, sp, (32*4)    \n"     /* deallocate frame                  */
         "mret                   \n"     /* return to task (restores PC+MIE)  */
         ::: "memory"
     );
@@ -343,7 +344,7 @@ __attribute__((naked)) void vPortRestoreFirstTask(void)
         "lw  x29,108(sp)        \n"
         "lw  x30,112(sp)        \n"
         "lw  x31,116(sp)        \n"
-        "addi sp, sp, (30*4)    \n"
+        "addi sp, sp, (32*4)    \n"
         "mret                   \n"
         ::: "memory"
     );

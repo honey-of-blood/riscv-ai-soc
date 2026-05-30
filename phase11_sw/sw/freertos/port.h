@@ -37,9 +37,11 @@
  *   SP+108 : x29 (t4)
  *   SP+112 : x30 (t5)
  *   SP+116 : x31 (t6)
- *   Total  : 30 words = 120 bytes
+ *   SP+120 : (pad0)
+ *   SP+124 : (pad1)
+ *   Total  : 32 words = 128 bytes  (multiple of 16 — satisfies RISC-V ABI alignment)
  */
-#define PORT_CONTEXT_WORDS  30
+#define PORT_CONTEXT_WORDS  32
 
 /* ── Port function declarations ──────────────────────────────────────────── */
 

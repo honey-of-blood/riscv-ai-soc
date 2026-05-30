@@ -2,43 +2,113 @@
 """
 gen_test_vectors.py — generate INT8 FC-layer test vectors for nn_fc_forward.
 
-Produces a C header (test_vectors.h) containing:
-  - Input INT8 activations
-  - INT8 weight matrices
-  - INT32 bias vectors
-  - Expected INT32 outputs (numpy reference)
-
-The test_nn.c file includes this header and verifies nn_fc_forward output
-matches the reference exactly.
+Produces test_vectors.h containing nn_fc_forward and nn_requantize test cases.
+All reference values are computed by numpy so they match exact integer arithmetic.
 
 Usage:
     python3 tools/gen_test_vectors.py --output sw/nn/test_vectors.h
-
-No PyTorch required — uses numpy only.
 """
 
 import argparse
 import numpy as np
 
-CASES = [
-    # (in_size, out_size, relu, seed)
-    (4,   4,  False, 1),    # T1: minimal 4×4  — exercises one accelerator tile
-    (4,   4,  True,  2),    # T2: with ReLU
-    (8,   4,  False, 3),    # T3: 2 input tiles, 1 output tile
-    (4,   8,  False, 4),    # T4: 1 input tile, 2 output tiles
-    (8,   8,  False, 5),    # T5: 2×2 tiles
-    (16,  8,  True,  6),    # T6: larger, with ReLU
-    (4,   4,  False, 7),    # T7: all-zero weights
-    (4,   4,  False, 8),    # T8: all-one activations
+# ── nn_fc_forward test cases ─────────────────────────────────────────────────
+# (in_size, out_size, relu, seed, label)
+FC_CASES = [
+    # ── Original 8 (regression baseline) ────────────────────────────────────
+    (4,   4,  False, 1, "4x4 basic"),
+    (4,   4,  True,  2, "4x4 relu"),
+    (8,   4,  False, 3, "8x4 2 in-tiles"),
+    (4,   8,  False, 4, "4x8 2 out-tiles"),
+    (8,   8,  False, 5, "8x8 2x2 tiles"),
+    (16,  8,  True,  6, "16x8 relu"),
+    (4,   4,  False, 7, "zero weights"),
+    (4,   4,  False, 8, "unit inputs"),
+
+    # ── Non-multiples of N (partial tiles) ───────────────────────────────────
+    (5,   4,  False, 10, "5x4 partial in"),
+    (4,   5,  False, 11, "4x5 partial out"),
+    (5,   5,  False, 12, "5x5 partial both"),
+    (7,   6,  False, 13, "7x6 both nonmult"),
+    (9,   7,  True,  14, "9x7 relu nonmult"),
+    (3,   4,  False, 15, "3x4 in<N"),
+    (4,   3,  False, 16, "4x3 out<N"),
+    (3,   3,  False, 17, "3x3 both<N"),
+
+    # ── Minimum dimensions ───────────────────────────────────────────────────
+    (1,   4,  False, 20, "1x4 single input"),
+    (4,   1,  False, 21, "4x1 single output"),
+    (1,   1,  False, 22, "1x1 minimum"),
+
+    # ── Larger (multi-tile) ──────────────────────────────────────────────────
+    (12,  4,  False, 30, "12x4 3 in-tiles"),
+    (4,  12,  False, 31, "4x12 3 out-tiles"),
+    (16, 16,  False, 32, "16x16 4x4 tiles"),
+    (784, 128, False, 33, "784x128 MNIST FC1"),
+    (128,  10, False, 34, "128x10 MNIST FC2"),
+
+    # ── INT8 saturation boundaries ───────────────────────────────────────────
+    (4,   4,  False, 40, "max+127 w and a"),   # weights=+127, inputs=+127
+    (4,   4,  False, 41, "min-128 w and a"),   # weights=-128, inputs=-128
+    (4,   4,  False, 42, "max w min a"),       # weights=+127, inputs=-128
+
+    # ── ReLU edge cases ──────────────────────────────────────────────────────
+    (8,   4,  True,  50, "relu all neg"),      # accumulation always negative
+    (8,   4,  True,  51, "relu all pos"),      # accumulation always positive
+]
+
+# ── nn_requantize test cases ─────────────────────────────────────────────────
+# (values_list, scale_q16, zero_point, expected_list, label)
+RQ_CASES = [
+    # scale=1.0 (Q16=65536) — identity within range
+    ([0, 1, 127, -1, -128],      65536, 0,  [0, 1, 127, -1, -128], "scale1 identity"),
+    # clip high: 200 * 1.0 + 0 = 200 → clips to 127
+    ([200, 300, 1000],           65536, 0,  [127, 127, 127],        "scale1 clip high"),
+    # clip low: -200 * 1.0 + 0 = -200 → clips to -128
+    ([-200, -300, -1000],        65536, 0,  [-128, -128, -128],     "scale1 clip low"),
+    # scale=0.5 (Q16=32768): 100 * 32768 >> 16 = 50
+    ([100, 200, -100, -200],     32768, 0,  [50, 100, -50, -100],   "scale0.5 halve"),
+    # scale=2.0 (Q16=131072): 80 * 2 = 160 → clips to 127
+    ([80, -80, 10, 0],           131072, 0, [127, -128, 20, 0],     "scale2 double+clip"),
+    # non-zero zero_point: adds offset after scaling
+    ([0, 0, 0, 0],               65536, 10,  [10, 10, 10, 10],      "zp=+10"),
+    ([0, 0, 0, 0],               65536, -10, [-10, -10, -10, -10],  "zp=-10"),
+    # zero_point causes clip on positive side: 120+10=130→127; -120+10=-110 (no clip)
+    ([120, -120],                65536, 10, [127, -110],             "zp clip"),
+    # len=1
+    ([42],                       65536, 0,  [42],                   "len=1"),
+    # boundary exact: 127 stays, 128 clips
+    ([127, 128, -128, -129],     65536, 0,  [127, 127, -128, -128], "boundary exact"),
 ]
 
 
-def ref_fc(w, b, x, relu):
-    """Reference INT32 fully-connected layer (numpy, no saturation)."""
-    out = w.astype(np.int32) @ x.astype(np.int32) + b.astype(np.int32)
+# ── Reference computations ───────────────────────────────────────────────────
+
+def ref_fc(W, b, x, relu):
+    """Exact integer FC forward pass (numpy INT32 arithmetic)."""
+    out = W.astype(np.int32) @ x.astype(np.int32) + b.astype(np.int32)
     if relu:
         out = np.maximum(out, 0)
     return out
+
+
+def ref_requantize(vals, scale_q16, zero_point):
+    """Exact integer requantize matching nn_requantize()."""
+    result = []
+    for v in vals:
+        q = int((v * scale_q16) >> 16) + zero_point
+        q = min(127, max(-128, q))
+        result.append(q)
+    return result
+
+
+# ── C header emission ────────────────────────────────────────────────────────
+
+def fmt_i8_arr(a):
+    return "{" + ", ".join(str(int(v)) for v in a.flatten()) + "}"
+
+def fmt_i32_arr(a):
+    return "{" + ", ".join(str(int(v)) for v in a.flatten()) + "}"
 
 
 def main():
@@ -52,77 +122,142 @@ def main():
         "#define TEST_VECTORS_H",
         "",
         '#include "nn.h"',
+        '#include <stdint.h>',
         "",
-        f"#define NUM_TEST_CASES  {len(CASES)}",
+        f"#define NUM_FC_CASES   {len(FC_CASES)}",
+        f"#define NUM_RQ_CASES   {len(RQ_CASES)}",
+        "",
+        "/* ═══════════════════════════════════════════════════════════════",
+        " * nn_fc_forward test cases",
+        " * ═══════════════════════════════════════════════════════════════ */",
         "",
     ]
 
-    for idx, (in_sz, out_sz, relu, seed) in enumerate(CASES):
+    for idx, (in_sz, out_sz, relu, seed, label) in enumerate(FC_CASES):
         rng = np.random.default_rng(seed)
 
         if seed == 7:
             W = np.zeros((out_sz, in_sz), dtype=np.int8)
         elif seed == 8:
             W = np.ones((out_sz, in_sz), dtype=np.int8)
+        elif seed == 40:           # max+127 everywhere
+            W = np.full((out_sz, in_sz), 127, dtype=np.int8)
+        elif seed == 41:           # min-128 everywhere
+            W = np.full((out_sz, in_sz), -128, dtype=np.int8)
+        elif seed == 42:           # weights=+127, inputs managed below
+            W = np.full((out_sz, in_sz), 127, dtype=np.int8)
+        elif seed == 50:           # relu all negative: w = +1, bias forces neg
+            W = np.ones((out_sz, in_sz), dtype=np.int8)
+        elif seed == 51:           # relu all positive: w = +1, bias forces pos
+            W = np.ones((out_sz, in_sz), dtype=np.int8)
         else:
             W = rng.integers(-128, 127, size=(out_sz, in_sz), dtype=np.int8)
 
-        b   = rng.integers(-256, 256, size=out_sz, dtype=np.int32)
-        x   = rng.integers(-128, 127, size=in_sz,  dtype=np.int8)
+        if seed == 40:
+            x = np.full(in_sz, 127, dtype=np.int8)
+        elif seed == 41:
+            x = np.full(in_sz, -128, dtype=np.int8)
+        elif seed == 42:
+            x = np.full(in_sz, -128, dtype=np.int8)
+        elif seed == 50:           # inputs = -1 everywhere, bias = -1000 (all negative after acc)
+            x = np.full(in_sz, -1, dtype=np.int8)
+        elif seed == 51:           # inputs = +1 everywhere, bias = +1000
+            x = np.full(in_sz, 1, dtype=np.int8)
+        else:
+            x = rng.integers(-128, 127, size=in_sz, dtype=np.int8)
+
+        if seed == 50:
+            b = np.full(out_sz, -1000, dtype=np.int32)
+        elif seed == 51:
+            b = np.full(out_sz, 1000, dtype=np.int32)
+        else:
+            b = rng.integers(-256, 256, size=out_sz, dtype=np.int32)
+
         ref = ref_fc(W, b, x, relu)
 
-        def fmt_i8(a):
-            return "{" + ", ".join(str(int(v)) for v in a.flatten()) + "}"
-
-        def fmt_i32(a):
-            return "{" + ", ".join(str(int(v)) for v in a.flatten()) + "}"
-
         lines += [
-            f"/* ── Test case {idx}: {in_sz}→{out_sz} relu={int(relu)} seed={seed} ── */",
-            f"static const int8_t  tc{idx}_input[{in_sz}]            = {fmt_i8(x)};",
-            f"static int8_t        tc{idx}_weights[{out_sz}][{in_sz}] = {{",
+            f"/* ── FC T{idx}: {label} ({in_sz}→{out_sz} relu={int(relu)}) ── */",
+            f"static const int8_t  fc{idx}_x[{in_sz}]            = {fmt_i8_arr(x)};",
+            f"static int8_t        fc{idx}_w[{out_sz}][{in_sz}] = {{",
         ]
         for r in range(out_sz):
             lines.append("    " + "{" + ", ".join(str(int(v)) for v in W[r]) + "},")
         lines += [
             "};",
-            f"static const int32_t tc{idx}_bias[{out_sz}]            = {fmt_i32(b)};",
-            f"static const int32_t tc{idx}_ref[{out_sz}]             = {fmt_i32(ref)};",
+            f"static int32_t       fc{idx}_b[{out_sz}]            = {fmt_i32_arr(b)};",
+            f"static const int32_t fc{idx}_ref[{out_sz}]           = {fmt_i32_arr(ref)};",
             "",
         ]
 
-    # Emit summary struct for the test runner
+    # nn_fc_forward test struct
     lines += [
         "typedef struct {",
         "    uint32_t  in_size;",
         "    uint32_t  out_size;",
         "    uint8_t   relu;",
-        "    int8_t   *weights;   /* [out_size][in_size] */",
+        "    const char *label;",
+        "    int8_t   *weights;",
         "    int32_t  *bias;",
         "    const int8_t   *input;",
         "    const int32_t  *ref;",
-        "} test_case_t;",
+        "} fc_case_t;",
         "",
-        "static test_case_t test_cases[NUM_TEST_CASES] = {",
+        "static fc_case_t fc_cases[NUM_FC_CASES] = {",
     ]
-    for idx, (in_sz, out_sz, relu, seed) in enumerate(CASES):
+    for idx, (in_sz, out_sz, relu, seed, label) in enumerate(FC_CASES):
         lines.append(
-            f"    {{ {in_sz}u, {out_sz}u, {int(relu)}u, "
-            f"(int8_t *)tc{idx}_weights, (int32_t *)tc{idx}_bias, "
-            f"tc{idx}_input, tc{idx}_ref }},"
+            f'    {{ {in_sz}u, {out_sz}u, {int(relu)}u, "{label}", '
+            f"(int8_t *)fc{idx}_w, fc{idx}_b, fc{idx}_x, fc{idx}_ref }},"
         )
+    lines += ["};", ""]
+
+    # ── nn_requantize test cases ─────────────────────────────────────────────
     lines += [
-        "};",
+        "/* ═══════════════════════════════════════════════════════════════",
+        " * nn_requantize test cases",
+        " * ═══════════════════════════════════════════════════════════════ */",
         "",
-        "#endif /* TEST_VECTORS_H */",
     ]
+    for idx, (vals, scale_q16, zp, expected, label) in enumerate(RQ_CASES):
+        n = len(vals)
+        vi  = "{" + ", ".join(str(v) for v in vals) + "}"
+        ve  = "{" + ", ".join(str(v) for v in expected) + "}"
+        lines += [
+            f"/* RQ T{idx}: {label} */",
+            f"static const int32_t rq{idx}_in[{n}]  = {vi};",
+            f"static const int8_t  rq{idx}_ref[{n}] = {ve};",
+            "",
+        ]
+
+    lines += [
+        "typedef struct {",
+        "    const char   *label;",
+        "    uint32_t      len;",
+        "    int32_t       scale_q16;",
+        "    int32_t       zero_point;",
+        "    const int32_t *in;",
+        "    const int8_t  *ref;",
+        "} rq_case_t;",
+        "",
+        "static rq_case_t rq_cases[NUM_RQ_CASES] = {",
+    ]
+    for idx, (vals, scale_q16, zp, expected, label) in enumerate(RQ_CASES):
+        lines.append(
+            f'    {{ "{label}", {len(vals)}u, {scale_q16}, {zp}, '
+            f"rq{idx}_in, rq{idx}_ref }},"
+        )
+    lines += ["};", ""]
+
+    lines += ["#endif /* TEST_VECTORS_H */", ""]
 
     with open(args.output, "w") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write("\n".join(lines))
 
-    print(f"Written {len(CASES)} test cases → {args.output}")
-    for idx, (in_sz, out_sz, relu, seed) in enumerate(CASES):
-        print(f"  T{idx}: {in_sz}→{out_sz}  relu={relu}  seed={seed}")
+    print(f"Written {len(FC_CASES)} FC cases + {len(RQ_CASES)} RQ cases → {args.output}")
+    for idx, (in_sz, out_sz, relu, seed, label) in enumerate(FC_CASES):
+        print(f"  FC T{idx:2d}: {in_sz:4d}→{out_sz:<4d} relu={int(relu)}  {label}")
+    for idx, (_, sq, zp, _, label) in enumerate(RQ_CASES):
+        print(f"  RQ T{idx:2d}: scale_q16={sq} zp={zp}  {label}")
 
 
 if __name__ == "__main__":

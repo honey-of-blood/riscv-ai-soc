@@ -222,14 +222,12 @@ def validate_quantized(model, out_path: str, n_samples: int = 32) -> None:
 
         # Quantized reference (numpy, mirrors nn_fc_forward tiling logic)
         x_q = x_np.astype(np.int8)
-        for w_q, b_q, scale in layers_q:
+        for li, (w_q, b_q, scale) in enumerate(layers_q):
             # Matrix multiply: [out] = [out×in] @ [in]
             acc = w_q @ x_q.astype(np.float32) + b_q
-            relu = True  # apply ReLU for all but last
-            if layers_q[-1] is (w_q, b_q, scale):
-                relu = False
-            if relu:
-                acc = np.maximum(acc, 0)
+            is_last = (li == len(layers_q) - 1)
+            if not is_last:
+                acc = np.maximum(acc, 0)   # ReLU on all but last layer
             x_q = np.clip(acc, -128, 127).astype(np.int8)
 
         out_q = acc  # last layer output stays INT32-like

@@ -69,7 +69,7 @@ static void vTaskUART(void *pvParameters)
         else {
             char tmp[10]; int t = 0;
             while (v) { tmp[t++] = '0' + (int)(v % 10); v /= 10; }
-            while (t--) buf[n++] = tmp[t + 1]; /* reverse */
+            while (t > 0) buf[n++] = tmp[--t]; /* reverse: pre-decrement reads tmp[t-1..0] */
         }
         buf[n++] = '\r'; buf[n++] = '\n';
         for (int i = 0; i < n; i++) uart_putc(buf[i]);
