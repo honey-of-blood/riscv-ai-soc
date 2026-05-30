@@ -186,3 +186,147 @@ async def test_pending_readonly(dut):
     pending = await apb_read(dut, 0x20)
     assert pending & 0xFF == 0, \
         f"Pending should be 0 (RO, no hw irq), got {pending:#010x}"
+
+
+# ===========================================================================
+# 8. Reset state
+# ===========================================================================
+@cocotb.test()
+async def test_reset_state(dut):
+    """After reset: m_ext_irq=0, pending=0, enable=0, priorities=0, threshold=0, claim=0."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await Timer(CLK_NS * 2, unit="ns")
+
+    assert _u32(dut.m_ext_irq) == 0, "m_ext_irq should be 0 after reset"
+    pending = await apb_read(dut, 0x20)
+    assert pending == 0, f"Pending should be 0 after reset, got {pending:#010x}"
+    enable  = await apb_read(dut, 0x24)
+    assert enable  == 0, f"Enable should be 0 after reset, got {enable:#010x}"
+    thresh  = await apb_read(dut, 0x28)
+    assert thresh  == 0, f"Threshold should be 0 after reset, got {thresh:#010x}"
+    claim   = await apb_read(dut, 0x2C)
+    assert claim   == 0, f"Claim should be 0 when nothing pending, got {claim:#010x}"
+    pri0    = await apb_read(dut, 0x00)
+    assert pri0 & 0x7 == 0, f"Priority[0] should be 0 after reset, got {pri0 & 0x7}"
+
+
+# ===========================================================================
+# 9. Enable bit gates interrupt delivery (pending still latches)
+# ===========================================================================
+@cocotb.test()
+async def test_enable_filter(dut):
+    """Source 0 fires with priority=5, enable=0; m_ext_irq must stay 0, pending still set."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    await apb_write(dut, 0x00, 5)    # priority[0]=5
+    await apb_write(dut, 0x24, 0x00) # enable = 0 (none enabled)
+    await apb_write(dut, 0x28, 0)    # threshold=0
+
+    dut.irq_src.value = 0x01
+    for _ in range(4): await RisingEdge(dut.clk)
+    dut.irq_src.value = 0x00
+    await Timer(CLK_NS * 2, unit="ns")
+
+    assert _u32(dut.m_ext_irq) == 0, "m_ext_irq should be 0 when source not enabled"
+    pending = await apb_read(dut, 0x20)
+    assert pending & 1 == 1, f"Pending[0] should latch even when not enabled, got {pending:#010x}"
+
+
+# ===========================================================================
+# 10. Priority=0 never fires (condition: priority > threshold; 0 > 0 is false)
+# ===========================================================================
+@cocotb.test()
+async def test_priority_zero_no_irq(dut):
+    """Source 0: priority=0 (reset default), enable=1, threshold=0; irq fires -> m_ext_irq=0."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    # Leave priority[0] at reset value of 0
+    await apb_write(dut, 0x24, 0x01) # enable source 0
+    await apb_write(dut, 0x28, 0)    # threshold=0
+
+    dut.irq_src.value = 0x01
+    for _ in range(4): await RisingEdge(dut.clk)
+    dut.irq_src.value = 0x00
+    await Timer(CLK_NS * 2, unit="ns")
+
+    assert _u32(dut.m_ext_irq) == 0, \
+        "m_ext_irq should NOT fire when priority=0 (0 > threshold=0 is false)"
+
+
+# ===========================================================================
+# 11. Claim returns 0 when nothing is pending
+# ===========================================================================
+@cocotb.test()
+async def test_claim_returns_zero_when_empty(dut):
+    """Read Claim/Complete with nothing pending -> returns 0."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    claim = await apb_read(dut, 0x2C)
+    assert claim == 0, f"Claim should return 0 when no pending IRQ, got {claim:#010x}"
+
+
+# ===========================================================================
+# 12. Pending latches — irq de-asserts but m_ext_irq stays until claimed
+# ===========================================================================
+@cocotb.test()
+async def test_irq_stays_pending(dut):
+    """HW irq de-asserts; pending stays set; m_ext_irq remains; claim/complete clears it."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    await apb_write(dut, 0x00, 3)    # priority[0]=3
+    await apb_write(dut, 0x24, 0x01) # enable source 0
+    await apb_write(dut, 0x28, 0)
+
+    dut.irq_src.value = 0x01
+    for _ in range(4): await RisingEdge(dut.clk)
+    dut.irq_src.value = 0x00         # de-assert hardware IRQ
+
+    for _ in range(5): await RisingEdge(dut.clk)
+
+    pending = await apb_read(dut, 0x20)
+    assert pending & 1 == 1, f"Pending should stay set after irq de-asserts, got {pending:#010x}"
+    assert _u32(dut.m_ext_irq) == 1, "m_ext_irq should stay asserted until claimed"
+
+    # Claim then complete to clear
+    claim = await apb_read(dut, 0x2C)
+    assert claim & 0xF == 1, f"Claim should return ID=1 (source 0), got {claim & 0xF}"
+    await apb_write(dut, 0x2C, claim & 0xF)
+    for _ in range(3): await RisingEdge(dut.clk)
+
+    pending = await apb_read(dut, 0x20)
+    assert pending & 1 == 0, f"Pending should clear after complete, got {pending:#010x}"
+    assert _u32(dut.m_ext_irq) == 0, "m_ext_irq should deassert after complete"
+
+
+# ===========================================================================
+# 13. All 8 sources fire simultaneously; highest priority wins claim
+# ===========================================================================
+@cocotb.test()
+async def test_all_eight_sources(dut):
+    """All 8 sources fire; source 6 (priority=7, highest) wins claim (ID=7)."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    # Set priorities: source 6 gets the max (7); others get 1-6 or 3
+    priorities = [1, 2, 3, 4, 5, 6, 7, 3]
+    for i, pri in enumerate(priorities):
+        await apb_write(dut, i * 4, pri)
+
+    await apb_write(dut, 0x24, 0xFF)  # enable all 8
+    await apb_write(dut, 0x28, 0)     # threshold=0
+
+    dut.irq_src.value = 0xFF
+    for _ in range(4): await RisingEdge(dut.clk)
+    dut.irq_src.value = 0x00
+    await Timer(CLK_NS * 2, unit="ns")
+
+    assert _u32(dut.m_ext_irq) == 1, "m_ext_irq should assert when any source fires"
+    claim = await apb_read(dut, 0x2C)
+    # Source 6 has priority 7 (highest); claim_id = 6+1 = 7
+    assert claim & 0xF == 7, \
+        f"Claim: expected source 6 (ID=7, priority=7) to win, got ID={claim & 0xF}"

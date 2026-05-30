@@ -1,7 +1,7 @@
 """
 UART unit tests — drives the APB interface and monitors the tx/rx pins directly.
 
-Tests:
+Tests (original):
   1. tx_single_byte     — write one byte, verify all 10 bits on tx pin
   2. tx_multiple_bytes  — write 3 bytes, verify correct order
   3. tx_fifo_full       — fill TX FIFO (16 bytes), verify full flag
@@ -280,3 +280,158 @@ async def test_loopback_echo(dut):
     rdata = await apb_read(dut, 0x04)
     assert (rdata >> 31) & 1, "loopback: RX valid flag not set"
     assert rdata & 0xFF == 0x7E, f"loopback: expected 0x7E, got {rdata & 0xFF:#04x}"
+
+# ===========================================================================
+# 9. Reset state
+# ===========================================================================
+@cocotb.test()
+async def test_reset_state(dut):
+    """After reset: tx=1 (idle), irq_tx_empty=1, irq_rx_valid=0, BAUD=868."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await Timer(CLK_NS * 2, unit="ns")
+
+    assert _u32(dut.tx)           == 1, f"tx should idle high after reset, got {_u32(dut.tx)}"
+    assert _u32(dut.irq_tx_empty) == 1, "irq_tx_empty should be 1 (FIFO empty) after reset"
+    assert _u32(dut.irq_rx_valid) == 0, "irq_rx_valid should be 0 (no data) after reset"
+    baud = await apb_read(dut, 0x0C)
+    assert baud == 868, f"default BAUD divisor should be 868, got {baud}"
+
+
+# ===========================================================================
+# 10. irq_tx_empty — level interrupt: 0 while FIFO has bytes, 1 when drained
+# ===========================================================================
+@cocotb.test()
+async def test_irq_tx_empty(dut):
+    """Push 4 bytes (slow baud); irq_tx_empty=0 while queued; =1 after drain."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await set_baud(dut, 1000)  # slow so FIFO doesn't drain instantly
+
+    # Push 4 bytes rapidly
+    for b in [0x11, 0x22, 0x33, 0x44]:
+        await apb_write(dut, 0x00, b)
+
+    # Give 1 clock for shift register to pop first byte
+    await Timer(CLK_NS * 3, unit="ns")
+    # FIFO still has bytes 2-4 queued → tx_empty=0 → irq=0
+    assert _u32(dut.irq_tx_empty) == 0, \
+        "irq_tx_empty should be 0 while bytes are queued in FIFO"
+
+    # Wait for all 4 bytes to transmit (10 bits × 1000 divisor × 4 bytes × 10 ns)
+    await Timer(CLK_NS * 10 * 1000 * 5, unit="ns")
+    # FIFO and shift register both empty → irq=1
+    assert _u32(dut.irq_tx_empty) == 1, \
+        "irq_tx_empty should be 1 after FIFO drains"
+
+
+# ===========================================================================
+# 11. irq_rx_valid — asserts when byte received, clears after RXDATA pop
+# ===========================================================================
+@cocotb.test()
+async def test_irq_rx_valid(dut):
+    """Receive 0xC3; irq_rx_valid=1; pop via RXDATA read; irq_rx_valid=0."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await set_baud(dut, BAUD_DIV)
+
+    assert _u32(dut.irq_rx_valid) == 0, "irq_rx_valid should be 0 before RX"
+
+    await drive_rx_frame(dut, 0xC3)
+    await Timer(BIT_NS * 3, unit="ns")
+
+    assert _u32(dut.irq_rx_valid) == 1, "irq_rx_valid should be 1 after byte received"
+
+    # Pop the byte — reading RXDATA pops FIFO
+    val = await apb_read(dut, 0x04)
+    assert val & 0xFF == 0xC3, f"RXDATA: expected 0xC3, got {val & 0xFF:#04x}"
+
+    await Timer(CLK_NS * 3, unit="ns")
+    assert _u32(dut.irq_rx_valid) == 0, \
+        "irq_rx_valid should clear after FIFO popped"
+
+
+# ===========================================================================
+# 12. RX FIFO full — fill 16 entries, STATUS[3] asserts
+# ===========================================================================
+@cocotb.test()
+async def test_rx_fifo_full(dut):
+    """Drive 16 RX frames back-to-back; STATUS[3]=rx_full should assert."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await set_baud(dut, BAUD_DIV)
+
+    for i in range(16):
+        await drive_rx_frame(dut, i)
+        await Timer(CLK_NS * 2, unit="ns")  # brief gap between frames
+
+    await Timer(BIT_NS * 3, unit="ns")  # wait for last byte to push to FIFO
+
+    status = await apb_read(dut, 0x08)
+    rx_full_bit = (status >> 3) & 1
+    assert rx_full_bit == 1, f"STATUS[3]=rx_full should be 1 after 16 bytes, got {status:#010x}"
+
+
+# ===========================================================================
+# 13. Transmit 0x00 (all-zero data bits)
+# ===========================================================================
+@cocotb.test()
+async def test_zero_byte(dut):
+    """Transmit 0x00: start=0, 8 data=0, stop=1. Verify on tx pin."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await set_baud(dut, BAUD_DIV)
+
+    await apb_write(dut, 0x00, 0x00)
+    received = await receive_tx_frame(dut)
+    assert received == 0x00, f"TX 0x00: expected 0x00, got {received:#04x}"
+
+
+# ===========================================================================
+# 14. Transmit 0xFF (all-ones data bits)
+# ===========================================================================
+@cocotb.test()
+async def test_ff_byte(dut):
+    """Transmit 0xFF: start=0, 8 data=1, stop=1. Verify on tx pin."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await set_baud(dut, BAUD_DIV)
+
+    await apb_write(dut, 0x00, 0xFF)
+    received = await receive_tx_frame(dut)
+    assert received == 0xFF, f"TX 0xFF: expected 0xFF, got {received:#04x}"
+
+
+# ===========================================================================
+# 15. TX pin idles high after all bytes sent
+# ===========================================================================
+@cocotb.test()
+async def test_tx_idles_high(dut):
+    """After transmitting 0xA5, tx pin must return to 1 (idle high)."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await set_baud(dut, BAUD_DIV)
+
+    await apb_write(dut, 0x00, 0xA5)
+    await receive_tx_frame(dut)                  # consume the frame
+    await Timer(BIT_NS * 3, unit="ns")          # wait well past stop bit
+
+    assert _u32(dut.tx) == 1, f"tx should idle high after frame, got {_u32(dut.tx)}"
+
+
+# ===========================================================================
+# 16. RX byte 0x00 (all-zero data bits)
+# ===========================================================================
+@cocotb.test()
+async def test_rx_zero_byte(dut):
+    """Drive 0x00 as 8N1 frame on rx pin; read back 0x00."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await set_baud(dut, BAUD_DIV)
+
+    await drive_rx_frame(dut, 0x00)
+    await Timer(BIT_NS * 3, unit="ns")
+
+    rdata = await apb_read(dut, 0x04)
+    assert (rdata >> 31) & 1 == 1, "RX valid flag should be set"
+    assert rdata & 0xFF == 0x00, f"RX byte: expected 0x00, got {rdata & 0xFF:#04x}"

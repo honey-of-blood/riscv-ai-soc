@@ -150,3 +150,79 @@ async def test_mtimecmp_wr_pulse(dut):
 
     assert wr_during == 1, f"mtimecmp_wr_o should be 1 during write cycle, got {wr_during}"
     assert wr_after  == 0, f"mtimecmp_wr_o should clear next cycle, got {wr_after}"
+
+
+# ===========================================================================
+# 6. Reset state
+# ===========================================================================
+@cocotb.test()
+async def test_reset_state(dut):
+    """After reset: msip_o=0, mtimecmp_wr_o=0, mtimecmp_lo_o/hi_o=0, MSIP reg=0."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+    await Timer(CLK_NS * 2, unit="ns")
+
+    assert _u32(dut.msip_o)        == 0, f"msip_o should be 0 after reset, got {_u32(dut.msip_o)}"
+    assert _u32(dut.mtimecmp_wr_o) == 0, f"mtimecmp_wr_o should be 0 after reset"
+    assert _u32(dut.mtimecmp_lo_o) == 0, f"mtimecmp_lo_o should be 0 after reset, got {_u32(dut.mtimecmp_lo_o):#010x}"
+    assert _u32(dut.mtimecmp_hi_o) == 0, f"mtimecmp_hi_o should be 0 after reset, got {_u32(dut.mtimecmp_hi_o):#010x}"
+    msip_reg = await apb_read(dut, 0x00)
+    assert msip_reg & 1 == 0, f"MSIP register should be 0 after reset, got {msip_reg:#010x}"
+
+
+# ===========================================================================
+# 7. mtip_i -> mtip_o is a direct combinational wire
+# ===========================================================================
+@cocotb.test()
+async def test_mtip_passthrough(dut):
+    """Drive mtip_i=1 -> mtip_o=1; drive mtip_i=0 -> mtip_o=0."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    dut.mtip_i.value = 1
+    await Timer(1, unit="ns")
+    assert _u32(dut.mtip_o) == 1, "mtip_o should follow mtip_i=1"
+
+    dut.mtip_i.value = 0
+    await Timer(1, unit="ns")
+    assert _u32(dut.mtip_o) == 0, "mtip_o should follow mtip_i=0"
+
+
+# ===========================================================================
+# 8. MSIP register stores only bit[0] — upper bits are ignored on write
+# ===========================================================================
+@cocotb.test()
+async def test_msip_bit_mask(dut):
+    """Write 0xFF to MSIP; only bit[0] stored; read back returns 0x1."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    await apb_write(dut, 0x00, 0xFF)
+    val = await apb_read(dut, 0x00)
+    assert val == 1, f"MSIP should store only bit[0]; expected 1, got {val:#010x}"
+    assert _u32(dut.msip_o) == 1, f"msip_o should be 1, got {_u32(dut.msip_o)}"
+
+
+# ===========================================================================
+# 9. Writing MTIMECMP_HI (0x10) also pulses mtimecmp_wr_o
+# ===========================================================================
+@cocotb.test()
+async def test_wr_pulse_on_hi_write(dut):
+    """Write MTIMECMP_HI (0x10); verify mtimecmp_wr_o pulses and mtimecmp_hi_o updates."""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    assert _u32(dut.mtimecmp_wr_o) == 0, "mtimecmp_wr_o should be 0 before write"
+
+    await apb_write(dut, 0x10, 0xDEAD_C0DE)
+    await Timer(CLK_NS // 2, unit="ns")
+    wr_during = _u32(dut.mtimecmp_wr_o)
+
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    wr_after = _u32(dut.mtimecmp_wr_o)
+
+    assert wr_during == 1, f"mtimecmp_wr_o should pulse on HI write, got {wr_during}"
+    assert wr_after  == 0, f"mtimecmp_wr_o should clear next cycle, got {wr_after}"
+    assert _u32(dut.mtimecmp_hi_o) == 0xDEAD_C0DE, \
+        f"mtimecmp_hi_o should update, got {_u32(dut.mtimecmp_hi_o):#010x}"
