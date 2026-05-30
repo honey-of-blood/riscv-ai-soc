@@ -185,10 +185,10 @@ dmem_axi_adapter u_adapter (
 assign dmem_rdata = is_mmio ? mmio_rdata : cache_rdata;
 assign dmem_stall = is_mmio ? mmio_stall : cache_stall;
 
-// ── Master 2: tied off ────────────────────────────────────────────────────────
-logic [31:0] m2_awaddr=0, m2_wdata=0, m2_araddr=0;
-logic  [3:0] m2_wstrb=0;
-logic        m2_awvalid=0, m2_wvalid=0, m2_bready=0, m2_arvalid=0, m2_rready=0;
+// ── Master 2: DMA engine (Phase 9) ───────────────────────────────────────────
+logic [31:0] m2_awaddr, m2_wdata, m2_araddr;
+logic  [3:0] m2_wstrb;
+logic        m2_awvalid, m2_wvalid, m2_bready, m2_arvalid, m2_rready;
 logic [31:0] m2_rdata;
 logic  [1:0] m2_bresp, m2_rresp;
 logic        m2_awready, m2_wready, m2_bvalid, m2_arready, m2_rvalid;
@@ -280,19 +280,19 @@ axi_apb_bridge u_apb_bridge (
 
 // ── APB peripheral wires ──────────────────────────────────────────────────────
 logic [11:0] regs_paddr, uart_paddr,  gpio_paddr, timer_paddr;
-logic [11:0] spi_paddr,  clint_paddr, plic_paddr;
+logic [11:0] spi_paddr,  clint_paddr, plic_paddr, dma_paddr;
 logic        regs_psel,  uart_psel,   gpio_psel,  timer_psel;
-logic        spi_psel,   clint_psel,  plic_psel;
+logic        spi_psel,   clint_psel,  plic_psel,  dma_psel;
 logic        regs_pen,   uart_pen,    gpio_pen,   timer_pen;
-logic        spi_pen,    clint_pen,   plic_pen;
+logic        spi_pen,    clint_pen,   plic_pen,   dma_pen;
 logic        regs_pwrite,uart_pwrite, gpio_pwrite,timer_pwrite;
-logic        spi_pwrite, clint_pwrite,plic_pwrite;
+logic        spi_pwrite, clint_pwrite,plic_pwrite, dma_pwrite;
 logic [31:0] regs_pwdata,uart_pwdata, gpio_pwdata,timer_pwdata;
-logic [31:0] spi_pwdata, clint_pwdata,plic_pwdata;
+logic [31:0] spi_pwdata, clint_pwdata,plic_pwdata, dma_pwdata;
 logic [31:0] regs_prdata,uart_prdata, gpio_prdata,timer_prdata;
-logic [31:0] spi_prdata, clint_prdata,plic_prdata;
+logic [31:0] spi_prdata, clint_prdata,plic_prdata, dma_prdata;
 logic        regs_pready,uart_pready, gpio_pready,timer_pready;
-logic        spi_pready, clint_pready,plic_pready;
+logic        spi_pready, clint_pready,plic_pready, dma_pready;
 logic        regs_pslverr;
 
 apb_demux u_apb_demux (
@@ -320,7 +320,10 @@ apb_demux u_apb_demux (
     .clint_pwrite(clint_pwrite), .clint_pwdata(clint_pwdata),.clint_prdata(clint_prdata), .clint_pready(clint_pready),
     // Slave 6: PLIC
     .plic_paddr  (plic_paddr),   .plic_psel   (plic_psel),   .plic_penable(plic_pen),
-    .plic_pwrite (plic_pwrite),  .plic_pwdata (plic_pwdata), .plic_prdata (plic_prdata),  .plic_pready (plic_pready)
+    .plic_pwrite (plic_pwrite),  .plic_pwdata (plic_pwdata), .plic_prdata (plic_prdata),  .plic_pready (plic_pready),
+    // Slave 7: DMA config (Phase 9)
+    .dma_paddr   (dma_paddr),    .dma_psel    (dma_psel),    .dma_penable (dma_pen),
+    .dma_pwrite  (dma_pwrite),   .dma_pwdata  (dma_pwdata),  .dma_prdata  (dma_prdata),   .dma_pready  (dma_pready)
 );
 
 // ── Slave 0: APB register file (Phase 5 backward compat, 0x1000_0xxx) ────────
@@ -397,24 +400,46 @@ clint u_clint (
     .msip_o        (m_sw_irq)
 );
 
-// ── PLIC (0x1000_6xxx) ────────────────────────────────────────────────────────
+// ── PLIC (0x1000_6xxx) — sources include DMA ch0/ch1 done (Phase 9) ──────────
+logic dma_irq_ch0, dma_irq_ch1;
 plic u_plic (
     .clk      (clk),       .rst_n  (rst_n),
     .paddr    (plic_paddr),.psel   (plic_psel),   .penable(plic_pen),
     .pwrite   (plic_pwrite),.pwdata(plic_pwdata), .prdata (plic_prdata),
     .pready   (plic_pready),
-    .irq_src  ({4'b0, timer_mtip, gpio_irq, uart_irq_tx, uart_irq_rx}),
+    .irq_src  ({2'b0, dma_irq_ch1, dma_irq_ch0,
+                timer_mtip, gpio_irq, uart_irq_tx, uart_irq_rx}),
     .m_ext_irq(m_ext_irq)
 );
 
-// ── Phase 4: AI accelerator (0x5000_xxxx) ────────────────────────────────────
-accel_top u_accel (
+// ── Phase 9: DMA engine (0x1000_7xxx config, M2 AXI master) ──────────────────
+dma u_dma (
+    .clk       (clk),      .rst_n     (rst_n),
+    // APB slave (config)
+    .paddr     (dma_paddr),.psel      (dma_psel),   .penable  (dma_pen),
+    .pwrite    (dma_pwrite),.pwdata   (dma_pwdata), .prdata   (dma_prdata),
+    .pready    (dma_pready),
+    // AXI4-Lite master → crossbar M2
+    .m_awaddr  (m2_awaddr), .m_awvalid(m2_awvalid), .m_awready(m2_awready),
+    .m_wdata   (m2_wdata),  .m_wstrb  (m2_wstrb),   .m_wvalid (m2_wvalid),
+    .m_wready  (m2_wready), .m_bresp  (m2_bresp),   .m_bvalid (m2_bvalid),
+    .m_bready  (m2_bready),
+    .m_araddr  (m2_araddr), .m_arvalid(m2_arvalid), .m_arready(m2_arready),
+    .m_rdata   (m2_rdata),  .m_rresp  (m2_rresp),   .m_rvalid (m2_rvalid),
+    .m_rready  (m2_rready),
+    // IRQ
+    .irq_ch0   (dma_irq_ch0), .irq_ch1(dma_irq_ch1)
+);
+
+// ── Phase 9: Accelerator v2 (0x5000_xxxx ctrl + 0x5001_xxxx scratchpad) ──────
+accel_top_v2 #(.N(4)) u_accel (
     .clk(clk), .rst_n(rst_n),
     .s_awaddr(s2_awaddr), .s_awvalid(s2_awvalid), .s_awready(s2_awready),
     .s_wdata (s2_wdata),  .s_wstrb  (s2_wstrb),   .s_wvalid (s2_wvalid),  .s_wready(s2_wready),
     .s_bresp (s2_bresp),  .s_bvalid (s2_bvalid),  .s_bready (s2_bready),
     .s_araddr(s2_araddr), .s_arvalid(s2_arvalid), .s_arready(s2_arready),
-    .s_rdata (s2_rdata),  .s_rresp  (s2_rresp),   .s_rvalid (s2_rvalid),  .s_rready(s2_rready)
+    .s_rdata (s2_rdata),  .s_rresp  (s2_rresp),   .s_rvalid (s2_rvalid),  .s_rready(s2_rready),
+    .irq_done ()
 );
 
 assign pc_obs_o = imem_addr;

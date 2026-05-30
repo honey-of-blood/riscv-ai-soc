@@ -204,25 +204,26 @@ assign s_rvalid[0]=s0_rvalid; assign s_rvalid[1]=s1_rvalid; assign s_rvalid[2]=s
 logic [1:0] m_awdec [3];
 logic [1:0] m_ardec [3];
 
+// S2 covers 0x5000_xxxx (accel registers) and 0x5001_xxxx (scratchpad write)
 assign m_awdec[0] = (m_awaddr[0][31:16]==16'h0000) ? 2'd0 :
                     (m_awaddr[0][31:16]==16'h1000) ? 2'd1 :
-                    (m_awaddr[0][31:16]==16'h5000) ? 2'd2 : 2'd3;
+                    (m_awaddr[0][31:16]==16'h5000 || m_awaddr[0][31:16]==16'h5001) ? 2'd2 : 2'd3;
 assign m_awdec[1] = (m_awaddr[1][31:16]==16'h0000) ? 2'd0 :
                     (m_awaddr[1][31:16]==16'h1000) ? 2'd1 :
-                    (m_awaddr[1][31:16]==16'h5000) ? 2'd2 : 2'd3;
+                    (m_awaddr[1][31:16]==16'h5000 || m_awaddr[1][31:16]==16'h5001) ? 2'd2 : 2'd3;
 assign m_awdec[2] = (m_awaddr[2][31:16]==16'h0000) ? 2'd0 :
                     (m_awaddr[2][31:16]==16'h1000) ? 2'd1 :
-                    (m_awaddr[2][31:16]==16'h5000) ? 2'd2 : 2'd3;
+                    (m_awaddr[2][31:16]==16'h5000 || m_awaddr[2][31:16]==16'h5001) ? 2'd2 : 2'd3;
 
 assign m_ardec[0] = (m_araddr[0][31:16]==16'h0000) ? 2'd0 :
                     (m_araddr[0][31:16]==16'h1000) ? 2'd1 :
-                    (m_araddr[0][31:16]==16'h5000) ? 2'd2 : 2'd3;
+                    (m_araddr[0][31:16]==16'h5000 || m_araddr[0][31:16]==16'h5001) ? 2'd2 : 2'd3;
 assign m_ardec[1] = (m_araddr[1][31:16]==16'h0000) ? 2'd0 :
                     (m_araddr[1][31:16]==16'h1000) ? 2'd1 :
-                    (m_araddr[1][31:16]==16'h5000) ? 2'd2 : 2'd3;
+                    (m_araddr[1][31:16]==16'h5000 || m_araddr[1][31:16]==16'h5001) ? 2'd2 : 2'd3;
 assign m_ardec[2] = (m_araddr[2][31:16]==16'h0000) ? 2'd0 :
                     (m_araddr[2][31:16]==16'h1000) ? 2'd1 :
-                    (m_araddr[2][31:16]==16'h5000) ? 2'd2 : 2'd3;
+                    (m_araddr[2][31:16]==16'h5000 || m_araddr[2][31:16]==16'h5001) ? 2'd2 : 2'd3;
 
 // ─── 3. Per-slave write arbitration (round-robin) ────────────────────────────
 // wr_grant[s]: which master (0-2) currently holds slave s's write channel

@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-// APB demux — fans one APB master to 7 peripheral slaves.
+// APB demux — fans one APB master to 8 peripheral slaves.
 // Decode: paddr[15:12] selects the target slave.
 //
 // Address map (within 0x1000_xxxx AXI region):
@@ -10,6 +10,7 @@
 //   sel=4  0x1000_4xxx  SPI
 //   sel=5  0x1000_5xxx  CLINT
 //   sel=6  0x1000_6xxx  PLIC
+//   sel=7  0x1000_7xxx  DMA config (Phase 9)
 module apb_demux (
     // From AXI-APB bridge
     input  logic [31:0] paddr,
@@ -84,7 +85,16 @@ module apb_demux (
     output logic        plic_pwrite,
     output logic [31:0] plic_pwdata,
     input  logic [31:0] plic_prdata,
-    input  logic        plic_pready
+    input  logic        plic_pready,
+
+    // Slave 7: DMA config (Phase 9)
+    output logic [11:0] dma_paddr,
+    output logic        dma_psel,
+    output logic        dma_penable,
+    output logic        dma_pwrite,
+    output logic [31:0] dma_pwdata,
+    input  logic [31:0] dma_prdata,
+    input  logic        dma_pready
 );
 
     // Address decode — bits [15:12] for slave select
@@ -102,6 +112,7 @@ module apb_demux (
     assign spi_psel   = psel & (sel == 4'd4);
     assign clint_psel = psel & (sel == 4'd5);
     assign plic_psel  = psel & (sel == 4'd6);
+    assign dma_psel   = psel & (sel == 4'd7);
 
     // Broadcast shared signals
     assign regs_paddr  = local_addr;  assign regs_penable  = penable;
@@ -118,6 +129,8 @@ module apb_demux (
     assign clint_pwrite = pwrite;     assign clint_pwdata  = pwdata;
     assign plic_paddr  = local_addr;  assign plic_penable  = penable;
     assign plic_pwrite = pwrite;      assign plic_pwdata   = pwdata;
+    assign dma_paddr   = local_addr;  assign dma_penable   = penable;
+    assign dma_pwrite  = pwrite;      assign dma_pwdata    = pwdata;
 
     // prdata / pready / pslverr mux
     always_comb begin
@@ -132,6 +145,7 @@ module apb_demux (
             4'd4: begin prdata = spi_prdata;   pready = spi_pready;   end
             4'd5: begin prdata = clint_prdata; pready = clint_pready; end
             4'd6: begin prdata = plic_prdata;  pready = plic_pready;  end
+            4'd7: begin prdata = dma_prdata;   pready = dma_pready;   end
             default: ;
         endcase
     end
