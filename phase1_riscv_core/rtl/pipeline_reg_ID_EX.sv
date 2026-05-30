@@ -64,7 +64,23 @@ module pipeline_reg_ID_EX (
     input  logic [11:0] csr_addr_i,
     output logic        is_csr_o,
     output logic        is_mret_o,
-    output logic [11:0] csr_addr_o
+    output logic [11:0] csr_addr_o,
+
+    // Phase 13: exception + atomic passthroughs
+    input  logic        is_ecall_i,
+    input  logic        is_ebreak_i,
+    input  logic        is_illegal_i,
+    input  logic        is_lr_i,
+    input  logic        is_sc_i,
+    input  logic        is_amo_i,
+    input  logic [4:0]  amo_funct5_i,
+    output logic        is_ecall_o,
+    output logic        is_ebreak_o,
+    output logic        is_illegal_o,
+    output logic        is_lr_o,
+    output logic        is_sc_o,
+    output logic        is_amo_o,
+    output logic [4:0]  amo_funct5_o
 );
 
     always_ff @(posedge clk) begin
@@ -91,6 +107,13 @@ module pipeline_reg_ID_EX (
             is_csr_o     <= 1'b0;
             is_mret_o    <= 1'b0;
             csr_addr_o   <= 12'b0;
+            is_ecall_o   <= 1'b0;
+            is_ebreak_o  <= 1'b0;
+            is_illegal_o <= 1'b0;
+            is_lr_o      <= 1'b0;
+            is_sc_o      <= 1'b0;
+            is_amo_o     <= 1'b0;
+            amo_funct5_o <= 5'b0;
         end else if (!stall_i) begin
             reg_write_o  <= reg_write_i;
             mem_read_o   <= mem_read_i;
@@ -113,6 +136,13 @@ module pipeline_reg_ID_EX (
             is_csr_o     <= is_csr_i;
             is_mret_o    <= is_mret_i;
             csr_addr_o   <= csr_addr_i;
+            is_ecall_o   <= is_ecall_i;
+            is_ebreak_o  <= is_ebreak_i;
+            is_illegal_o <= is_illegal_i;
+            is_lr_o      <= is_lr_i;
+            is_sc_o      <= is_sc_i;
+            is_amo_o     <= is_amo_i;
+            amo_funct5_o <= amo_funct5_i;
         end
     end
 

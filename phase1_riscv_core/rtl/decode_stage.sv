@@ -37,7 +37,16 @@ module decode_stage (
     output logic        is_mext_o,      // RV32IM M-extension instruction (funct7=0000001)
     output logic        is_csr_o,       // CSR instruction (SYSTEM, funct3 != 000)
     output logic        is_mret_o,      // MRET instruction
-    output logic [11:0] csr_addr_o      // CSR register address (instr[31:20])
+    output logic [11:0] csr_addr_o,     // CSR register address (instr[31:20])
+    // Phase 13: synchronous exception signals
+    output logic        is_ecall_o,     // ECALL instruction
+    output logic        is_ebreak_o,    // EBREAK instruction
+    output logic        is_illegal_o,   // unrecognised encoding
+    // Phase 13: RVA atomic signals
+    output logic        is_lr_o,        // LR.W
+    output logic        is_sc_o,        // SC.W
+    output logic        is_amo_o,       // other AMO instruction
+    output logic [4:0]  amo_funct5_o   // instr[31:27] for AMO sub-opcode
 );
 
     // -------------------------------------------------------------------------
@@ -53,6 +62,7 @@ module decode_stage (
     localparam OP_LUI    = 7'b011_0111;
     localparam OP_AUIPC  = 7'b001_0111;
     localparam OP_SYSTEM = 7'b111_0011;
+    localparam OP_AMO    = 7'b010_1111;  // RV32A atomic
 
     // ALU control encodings (must match alu.sv)
     localparam ALU_ADD  = 4'b0000;
@@ -90,7 +100,8 @@ module decode_stage (
     assign funct7   = instr_i[31:25];
     assign funct7_5 = instr_i[30];
     assign csr_addr = instr_i[31:20];
-    assign csr_addr_o = csr_addr;
+    assign csr_addr_o   = csr_addr;
+    assign amo_funct5_o = instr_i[31:27];
 
     // -------------------------------------------------------------------------
     // Immediate generation (instantiate shared imm_gen)
@@ -127,6 +138,12 @@ module decode_stage (
         is_mext_o   = 1'b0;
         is_csr_o    = 1'b0;
         is_mret_o   = 1'b0;
+        is_ecall_o  = 1'b0;
+        is_ebreak_o = 1'b0;
+        is_illegal_o= 1'b0;
+        is_lr_o     = 1'b0;
+        is_sc_o     = 1'b0;
+        is_amo_o    = 1'b0;
 
         case (opcode)
             OP_R:     begin
@@ -176,18 +193,39 @@ module decode_stage (
                 if (funct3 != 3'b000) begin
                     // CSRRW/CSRRS/CSRRC (funct3=001/010/011)
                     is_csr_o    = 1'b1;
-                    reg_write_o = (rd != 5'b0);  // write old CSR value to rd if rd!=x0
-                    // alu_src_a=0, alu_src_b=0: execute_stage computes rs1+0 = rs1
-                    // riscv_core overrides alu_result with old CSR value for the rd path
-                end else if (csr_addr == 12'h302) begin
-                    // MRET: opcode=SYSTEM, funct3=000, funct12=0x302
-                    is_mret_o   = 1'b1;
-                    jump_o      = 1'b1;  // triggers 2-cycle flush via hazard_unit
-                    alu_src_a_o = 1'b1;  // PC-relative (target overridden in riscv_core)
-                    alu_src_b_o = 1'b1;
+                    reg_write_o = (rd != 5'b0);
+                end else begin
+                    case (csr_addr)
+                        12'h000: is_ecall_o  = 1'b1;  // ECALL
+                        12'h001: is_ebreak_o = 1'b1;  // EBREAK
+                        12'h302: begin                  // MRET
+                            is_mret_o   = 1'b1;
+                            jump_o      = 1'b1;
+                            alu_src_a_o = 1'b1;
+                            alu_src_b_o = 1'b1;
+                        end
+                        default: is_illegal_o = 1'b1;
+                    endcase
                 end
             end
-            default: begin end
+            OP_AMO: begin   // RV32A
+                reg_write_o = 1'b1;
+                mem_read_o  = 1'b1;   // all AMOs read first
+                wb_sel_o    = WB_MEM; // rd ← old memory value
+                // amo_funct5_o = instr_i[31:27] pre-assigned outside always_comb
+                case (amo_funct5_o)
+                    5'b00010: is_lr_o  = 1'b1;   // LR.W
+                    5'b00011: begin               // SC.W
+                        is_sc_o     = 1'b1;
+                        mem_write_o = 1'b1;
+                    end
+                    default: begin                // AMOSWAP/ADD/AND/OR/XOR/MIN/MAX
+                        is_amo_o    = 1'b1;
+                        mem_write_o = 1'b1;
+                    end
+                endcase
+            end
+            default: is_illegal_o = 1'b1;
         endcase
     end
 

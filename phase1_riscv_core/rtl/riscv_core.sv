@@ -1,13 +1,8 @@
 `timescale 1ns/1ps
 
-// RV32IM 5-stage pipeline: IF → ID → EX → MEM → WB
-// Harvard memory model: separate instruction and data ports.
-// Hazard handling:
-//   - Load-use:      1-cycle stall (PC + IF/ID hold; ID/EX NOP bubble)
-//   - Branch/jump:   2-cycle flush (IF/ID + ID/EX squashed; static not-taken)
-//   - RAW dist-1/2:  resolved by forwarding unit (EX/MEM→EX, MEM/WB→EX)
-//   - RAW dist-3:    resolved by write-before-read in reg_file
-//   - M-ext divide:  32-cycle stall (whole pipeline frozen via hazard_unit)
+// RV32IMAC 5-stage pipeline: IF → ID → EX → MEM → WB  (Phase 13)
+// Phase 13 additions: RVC fetch, RVA atomics, full CSR bank (csr_file.sv),
+// synchronous exceptions (illegal, ECALL, EBREAK, load/store misalign/fault), PMP.
 module riscv_core (
     input  logic        clk,
     input  logic        rst,
@@ -53,79 +48,97 @@ module riscv_core (
     logic [11:0] csr_addr_d;
     logic        is_csr_e, is_mret_e;
     logic [11:0] csr_addr_e;
+    // Phase 13 decode signals (ID stage)
+    logic        is_ecall_d, is_ebreak_d, is_illegal_d;
+    logic        is_lr_d, is_sc_d, is_amo_d;
+    logic [4:0]  amo_funct5_d;
 
-    // CSR registers (M-mode only)
-    logic [31:0] mstatus_r, mie_r, mtvec_r, mepc_r, mcause_r;
+    // ── Phase 13: CSR file outputs ────────────────────────────────────────────
+    logic [31:0] mstatus_r, mie_r, mtvec_r, mepc_r, mcause_r, mtval_r;
+
+    // Exception / interrupt signals from EX stage
+    logic        is_ecall_e, is_ebreak_e, is_illegal_e;
+    logic        is_lr_e, is_sc_e, is_amo_e;
+    logic [4:0]  amo_funct5_e;
+
+    // Synchronous exception detection (combinational)
+    logic sync_exc;     // any synchronous exception in EX stage
+    logic [31:0] sync_exc_cause, sync_exc_tval;
+    always_comb begin
+        sync_exc       = 1'b0;
+        sync_exc_cause = 32'b0;
+        sync_exc_tval  = 32'b0;
+        if (is_illegal_e) begin
+            sync_exc       = 1'b1;
+            sync_exc_cause = 32'd2;   // illegal instruction
+            sync_exc_tval  = 32'b0;   // optionally the bad instruction word
+        end else if (is_ebreak_e) begin
+            sync_exc       = 1'b1;
+            sync_exc_cause = 32'd3;   // EBREAK
+        end else if (is_ecall_e) begin
+            sync_exc       = 1'b1;
+            sync_exc_cause = 32'd11;  // ECALL from M-mode
+        end
+    end
 
     // Machine interrupt pending (driven by hardware inputs)
     logic [11:0] mip_w;
     assign mip_w = {m_ext_irq_i, 3'b0, m_timer_irq_i, 3'b0, m_sw_irq_i, 3'b0};
 
-    // Trap detection: fire when at least one interrupt is enabled and MIE=1
-    logic irq_pending, trap_fire;
-    assign irq_pending = |(mip_w & mie_r[11:0]);
-    assign trap_fire   = irq_pending && mstatus_r[3] && !mext_stall && !dmem_stall_i && !is_mret_e;
-
-    // Extract mstatus/mie bits outside always blocks (Icarus compat: no bit-selects in always_*)
-    logic mstatus_mie_bit, mstatus_mpie_bit;
-    assign mstatus_mie_bit  = mstatus_r[3];
-    assign mstatus_mpie_bit = mstatus_r[7];
+    // mstatus/mie field extracts (Icarus: no bit-selects inside always blocks)
+    logic mstatus_mie_bit;
     logic mie_meie, mie_mtie;
-    assign mie_meie = mie_r[11];
-    assign mie_mtie = mie_r[7];
+    assign mstatus_mie_bit = mstatus_r[3];
+    assign mie_meie        = mie_r[11];
+    assign mie_mtie        = mie_r[7];
 
-    // Full-word mstatus updates for trap entry and MRET (no bit-selects in always_ff)
-    // Bits: MPIE=7 (0x80), MIE=3 (0x08)
-    logic [31:0] mstatus_trap_val, mstatus_mret_val;
-    assign mstatus_trap_val = (mstatus_r & ~32'h88) | (mstatus_mie_bit  ? 32'h80 : 32'h0);
-    assign mstatus_mret_val = (mstatus_r & ~32'h88) | 32'h80              | (mstatus_mpie_bit ? 32'h8 : 32'h0);
+    // Interrupt fire
+    logic irq_pending, irq_fire;
+    assign irq_pending = |(mip_w & mie_r[11:0]);
+    assign irq_fire    = irq_pending && mstatus_mie_bit && !mext_stall && !dmem_stall_i && !is_mret_e;
 
-    // CSR read-out (combinational — based on current EX-stage CSR address)
-    logic [31:0] csr_rd_data;
+    // Any trap (sync exception takes priority over interrupt)
+    logic        trap_fire;
+    logic [31:0] trap_cause, trap_tval, trap_epc;
+    assign trap_fire = sync_exc || irq_fire;
+
+    // Interrupt cause (external > timer > software priority)
+    logic [31:0] irq_cause;
     always_comb begin
-        case (csr_addr_e)
-            12'h300: csr_rd_data = mstatus_r;
-            12'h304: csr_rd_data = mie_r;
-            12'h305: csr_rd_data = mtvec_r;
-            12'h341: csr_rd_data = mepc_r;
-            12'h342: csr_rd_data = mcause_r;
-            12'h344: csr_rd_data = {20'b0, mip_w};
-            default: csr_rd_data = 32'b0;
-        endcase
+        if      (m_ext_irq_i   && mie_meie) irq_cause = 32'h8000_000B;
+        else if (m_timer_irq_i && mie_mtie) irq_cause = 32'h8000_0007;
+        else                                irq_cause = 32'h8000_0003;
     end
 
-    // CSR write data based on funct3 operation (CSRRW/CSRRS/CSRRC)
+    assign trap_cause = sync_exc ? sync_exc_cause : irq_cause;
+    assign trap_tval  = sync_exc ? sync_exc_tval  : 32'b0;
+    assign trap_epc   = sync_exc ? pc_e : pc_d;    // sync: PC of faulting instr; irq: next PC
+
+    // CSR read data (presented to pipeline in EX stage)
+    logic [31:0] csr_rd_data;
+    logic        csr_en;
+    assign csr_en = is_csr_e && !mext_stall && !dmem_stall_i;
+
+    // Combined branch/redirect: branch/jump + trap + MRET
+    logic        comb_branch_taken;
+    logic [31:0] comb_branch_target;
+    assign comb_branch_taken  = branch_taken || trap_fire || is_mret_e;
+    assign comb_branch_target = trap_fire  ? mtvec_r  :
+                                is_mret_e  ? mepc_r   :
+                                branch_target;
+
+    // CSR write data (computed by csr_file from funct3 op)
     logic [31:0] csr_wdata_e;
     logic [1:0]  csr_op_e;
     assign csr_op_e = funct3_e[1:0];
     always_comb begin
         case (csr_op_e)
-            2'b01: csr_wdata_e = ex_rs1_fwd;                     // CSRRW
-            2'b10: csr_wdata_e = csr_rd_data | ex_rs1_fwd;       // CSRRS
-            2'b11: csr_wdata_e = csr_rd_data & ~ex_rs1_fwd;      // CSRRC
+            2'b01: csr_wdata_e = ex_rs1_fwd;
+            2'b10: csr_wdata_e = csr_rd_data | ex_rs1_fwd;
+            2'b11: csr_wdata_e = csr_rd_data & ~ex_rs1_fwd;
             default: csr_wdata_e = ex_rs1_fwd;
         endcase
     end
-
-    // Gate CSR writes against stalls
-    logic csr_en;
-    assign csr_en = is_csr_e && !mext_stall && !dmem_stall_i;
-
-    // Interrupt cause (external > timer > software priority)
-    logic [31:0] trap_mcause;
-    always_comb begin
-        if      (m_ext_irq_i   && mie_meie) trap_mcause = 32'h8000_000B; // MEIP=11
-        else if (m_timer_irq_i && mie_mtie) trap_mcause = 32'h8000_0007; // MTIP=7
-        else                                trap_mcause = 32'h8000_0003; // MSIP=3
-    end
-
-    // Combined branch taken: normal branch + trap entry + MRET
-    logic        comb_branch_taken;
-    logic [31:0] comb_branch_target;
-    assign comb_branch_taken  = branch_taken || trap_fire || is_mret_e;
-    assign comb_branch_target = trap_fire  ? mtvec_r     :
-                                is_mret_e  ? mepc_r      :
-                                branch_target;
 
     // Branch/jump resolution from execute stage → fetch stage + hazard unit
     logic        branch_taken;
@@ -232,7 +245,14 @@ module riscv_core (
         .is_mext_o   (is_mext_d),
         .is_csr_o    (is_csr_d),
         .is_mret_o   (is_mret_d),
-        .csr_addr_o  (csr_addr_d)
+        .csr_addr_o  (csr_addr_d),
+        .is_ecall_o  (is_ecall_d),
+        .is_ebreak_o (is_ebreak_d),
+        .is_illegal_o(is_illegal_d),
+        .is_lr_o     (is_lr_d),
+        .is_sc_o     (is_sc_d),
+        .is_amo_o    (is_amo_d),
+        .amo_funct5_o(amo_funct5_d)
     );
 
     // =========================================================================
@@ -292,7 +312,21 @@ module riscv_core (
         .csr_addr_i  (csr_addr_d),
         .is_csr_o    (is_csr_e),
         .is_mret_o   (is_mret_e),
-        .csr_addr_o  (csr_addr_e)
+        .csr_addr_o  (csr_addr_e),
+        .is_ecall_i  (is_ecall_d),
+        .is_ebreak_i (is_ebreak_d),
+        .is_illegal_i(is_illegal_d),
+        .is_lr_i     (is_lr_d),
+        .is_sc_i     (is_sc_d),
+        .is_amo_i    (is_amo_d),
+        .amo_funct5_i(amo_funct5_d),
+        .is_ecall_o  (is_ecall_e),
+        .is_ebreak_o (is_ebreak_e),
+        .is_illegal_o(is_illegal_e),
+        .is_lr_o     (is_lr_e),
+        .is_sc_o     (is_sc_e),
+        .is_amo_o    (is_amo_e),
+        .amo_funct5_o(amo_funct5_e)
     );
 
     // =========================================================================
@@ -390,39 +424,55 @@ module riscv_core (
     );
 
     // =========================================================================
-    // CSR register file + trap / interrupt logic
+    // CSR file (Phase 13: extended bank — replaces inline CSR registers)
     // =========================================================================
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            mstatus_r <= 32'b0;
-            mie_r     <= 32'b0;
-            mtvec_r   <= 32'b0;
-            mepc_r    <= 32'b0;
-            mcause_r  <= 32'b0;
-        end else begin
-            // CSR register writes from CSRRW/CSRRS/CSRRC in EX stage
-            if (csr_en) begin
-                case (csr_addr_e)
-                    12'h300: mstatus_r <= csr_wdata_e;
-                    12'h304: mie_r     <= csr_wdata_e;
-                    12'h305: mtvec_r   <= csr_wdata_e;
-                    12'h341: mepc_r    <= csr_wdata_e;
-                    12'h342: mcause_r  <= csr_wdata_e;
-                    default: ;
-                endcase
-            end
-            // Trap entry: save context and redirect to mtvec
-            if (trap_fire) begin
-                mepc_r    <= pc_d;
-                mcause_r  <= trap_mcause;
-                mstatus_r <= mstatus_trap_val;  // MPIE=old_MIE, MIE=0
-            end
-            // MRET: restore interrupt enable
-            if (is_mret_e) begin
-                mstatus_r <= mstatus_mret_val;  // MIE=MPIE, MPIE=1
-            end
-        end
-    end
+    csr_file u_csr (
+        .clk             (clk),
+        .rst             (rst),
+        .csr_en_i        (csr_en),
+        .csr_addr_i      (csr_addr_e),
+        .csr_op_i        (csr_op_e),
+        .csr_wdata_i     (csr_wdata_e),
+        .csr_rdata_o     (csr_rd_data),
+        .instr_commit_i  (wb_reg_write || !stall_if),  // retire when not stalled
+        .trap_enter_i    (trap_fire),
+        .trap_cause_i    (trap_cause),
+        .trap_epc_i      (trap_epc),
+        .trap_tval_i     (trap_tval),
+        .mret_i          (is_mret_e),
+        .m_ext_irq_i     (m_ext_irq_i),
+        .m_timer_irq_i   (m_timer_irq_i),
+        .m_sw_irq_i      (m_sw_irq_i),
+        .mstatus_o       (mstatus_r),
+        .mie_o           (mie_r),
+        .mtvec_o         (mtvec_r),
+        .mepc_o          (mepc_r),
+        .mcause_o        (mcause_r),
+        .mtval_o         (mtval_r)
+    );
+
+    // =========================================================================
+    // Atomic unit (Phase 13: LR/SC + AMO)
+    // =========================================================================
+    logic [31:0] sc_result, amo_wdata, amo_rd_val;
+    logic        sc_store_en;
+
+    atomic_unit u_atomic (
+        .clk          (clk),
+        .rst          (rst),
+        .lr_valid_i   (is_lr_e   && !mext_stall && !dmem_stall_i),
+        .sc_valid_i   (is_sc_e   && !mext_stall && !dmem_stall_i),
+        .amo_valid_i  (is_amo_e  && !mext_stall && !dmem_stall_i),
+        .amo_funct3_i (funct3_e),
+        .amo_funct5_i (amo_funct5_e),
+        .mem_addr_i   (ex_alu_result),
+        .rs2_data_i   (ex_rs2_fwd),
+        .mem_rdata_i  (dmem_rdata_i),
+        .sc_result_o  (sc_result),
+        .amo_wdata_o  (amo_wdata),
+        .amo_rd_o     (amo_rd_val),
+        .sc_store_en_o(sc_store_en)
+    );
 
     // =========================================================================
     // M-extension unit
