@@ -40,7 +40,7 @@ static void uart_int(int v)
     int n = 0;
     if (v == 0) { uart_putc('0'); return; }
     while (v) { buf[n++] = '0' + (v % 10); v /= 10; }
-    while (n--) uart_putc(buf[n + 1]);
+    for (int i = n - 1; i >= 0; i--) uart_putc(buf[i]);
 }
 
 /* ── Argmax over INT32 array ─────────────────────────────────────────────── */

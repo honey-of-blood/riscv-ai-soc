@@ -38,7 +38,7 @@ static void uart_uint(uint32_t v)
     int n = 0;
     if (v == 0) { uart_putc('0'); return; }
     while (v) { buf[n++] = '0' + (v % 10); v /= 10; }
-    while (n--) uart_putc(buf[n + 1]);  /* buf is reversed */
+    for (int i = n - 1; i >= 0; i--) uart_putc(buf[i]);
 }
 
 /* Print u32 as "X.XXX ms" where SYSCLK_HZ = 100 MHz, cycles to µs = /100. */
