@@ -25,7 +25,12 @@ module riscv_core (
     input  logic [31:0] dmem_rdata_i,
 
     // Cache stall: asserted by L1 cache during a miss; freezes entire pipeline
-    input  logic        dmem_stall_i
+    input  logic        dmem_stall_i,
+
+    // M-mode interrupt inputs (from PLIC / CLINT)
+    input  logic        m_ext_irq_i,    // external interrupt (PLIC)
+    input  logic        m_timer_irq_i,  // timer interrupt (CLINT/timer)
+    input  logic        m_sw_irq_i      // software interrupt (CLINT MSIP)
 );
 
     // =========================================================================
@@ -42,6 +47,85 @@ module riscv_core (
     logic        is_div_in_ex;
     logic [31:0] mext_result;
     logic [31:0] ex_rs1_fwd;  // ex_rs2_fwd declared below with other EX-stage wires
+
+    // CSR / interrupt signals
+    logic        is_csr_d, is_mret_d;
+    logic [11:0] csr_addr_d;
+    logic        is_csr_e, is_mret_e;
+    logic [11:0] csr_addr_e;
+
+    // CSR registers (M-mode only)
+    logic [31:0] mstatus_r, mie_r, mtvec_r, mepc_r, mcause_r;
+
+    // Machine interrupt pending (driven by hardware inputs)
+    logic [11:0] mip_w;
+    assign mip_w = {m_ext_irq_i, 3'b0, m_timer_irq_i, 3'b0, m_sw_irq_i, 3'b0};
+
+    // Trap detection: fire when at least one interrupt is enabled and MIE=1
+    logic irq_pending, trap_fire;
+    assign irq_pending = |(mip_w & mie_r[11:0]);
+    assign trap_fire   = irq_pending && mstatus_r[3] && !mext_stall && !dmem_stall_i && !is_mret_e;
+
+    // Extract mstatus/mie bits outside always blocks (Icarus compat: no bit-selects in always_*)
+    logic mstatus_mie_bit, mstatus_mpie_bit;
+    assign mstatus_mie_bit  = mstatus_r[3];
+    assign mstatus_mpie_bit = mstatus_r[7];
+    logic mie_meie, mie_mtie;
+    assign mie_meie = mie_r[11];
+    assign mie_mtie = mie_r[7];
+
+    // Full-word mstatus updates for trap entry and MRET (no bit-selects in always_ff)
+    // Bits: MPIE=7 (0x80), MIE=3 (0x08)
+    logic [31:0] mstatus_trap_val, mstatus_mret_val;
+    assign mstatus_trap_val = (mstatus_r & ~32'h88) | (mstatus_mie_bit  ? 32'h80 : 32'h0);
+    assign mstatus_mret_val = (mstatus_r & ~32'h88) | 32'h80              | (mstatus_mpie_bit ? 32'h8 : 32'h0);
+
+    // CSR read-out (combinational — based on current EX-stage CSR address)
+    logic [31:0] csr_rd_data;
+    always_comb begin
+        case (csr_addr_e)
+            12'h300: csr_rd_data = mstatus_r;
+            12'h304: csr_rd_data = mie_r;
+            12'h305: csr_rd_data = mtvec_r;
+            12'h341: csr_rd_data = mepc_r;
+            12'h342: csr_rd_data = mcause_r;
+            12'h344: csr_rd_data = {20'b0, mip_w};
+            default: csr_rd_data = 32'b0;
+        endcase
+    end
+
+    // CSR write data based on funct3 operation (CSRRW/CSRRS/CSRRC)
+    logic [31:0] csr_wdata_e;
+    logic [1:0]  csr_op_e;
+    assign csr_op_e = funct3_e[1:0];
+    always_comb begin
+        case (csr_op_e)
+            2'b01: csr_wdata_e = ex_rs1_fwd;                     // CSRRW
+            2'b10: csr_wdata_e = csr_rd_data | ex_rs1_fwd;       // CSRRS
+            2'b11: csr_wdata_e = csr_rd_data & ~ex_rs1_fwd;      // CSRRC
+            default: csr_wdata_e = ex_rs1_fwd;
+        endcase
+    end
+
+    // Gate CSR writes against stalls
+    logic csr_en;
+    assign csr_en = is_csr_e && !mext_stall && !dmem_stall_i;
+
+    // Interrupt cause (external > timer > software priority)
+    logic [31:0] trap_mcause;
+    always_comb begin
+        if      (m_ext_irq_i   && mie_meie) trap_mcause = 32'h8000_000B; // MEIP=11
+        else if (m_timer_irq_i && mie_mtie) trap_mcause = 32'h8000_0007; // MTIP=7
+        else                                trap_mcause = 32'h8000_0003; // MSIP=3
+    end
+
+    // Combined branch taken: normal branch + trap entry + MRET
+    logic        comb_branch_taken;
+    logic [31:0] comb_branch_target;
+    assign comb_branch_taken  = branch_taken || trap_fire || is_mret_e;
+    assign comb_branch_target = trap_fire  ? mtvec_r     :
+                                is_mret_e  ? mepc_r      :
+                                branch_target;
 
     // Branch/jump resolution from execute stage → fetch stage + hazard unit
     logic        branch_taken;
@@ -71,8 +155,8 @@ module riscv_core (
         .clk             (clk),
         .rst             (rst),
         .stall_i         (stall_if),
-        .branch_taken_i  (branch_taken),
-        .branch_target_i (branch_target),
+        .branch_taken_i  (comb_branch_taken),
+        .branch_target_i (comb_branch_target),
         .imem_rdata_i    (imem_rdata_i),
         .imem_addr_o     (imem_addr_o),
         .pc_if_o         (pc_f),
@@ -145,7 +229,10 @@ module riscv_core (
         .jump_o      (jump_d),
         .alu_ctrl_o  (alu_ctrl_d),
         .wb_sel_o    (wb_sel_d),
-        .is_mext_o   (is_mext_d)
+        .is_mext_o   (is_mext_d),
+        .is_csr_o    (is_csr_d),
+        .is_mret_o   (is_mret_d),
+        .csr_addr_o  (csr_addr_d)
     );
 
     // =========================================================================
@@ -199,7 +286,13 @@ module riscv_core (
         .rs2_o       (rs2_e),
         .rd_o        (rd_e),
         .is_mext_i   (is_mext_d),
-        .is_mext_o   (is_mext_e)
+        .is_mext_o   (is_mext_e),
+        .is_csr_i    (is_csr_d),
+        .is_mret_i   (is_mret_d),
+        .csr_addr_i  (csr_addr_d),
+        .is_csr_o    (is_csr_e),
+        .is_mret_o   (is_mret_e),
+        .csr_addr_o  (csr_addr_e)
     );
 
     // =========================================================================
@@ -284,7 +377,7 @@ module riscv_core (
         .rd_ex_i        (rd_e),
         .rs1_id_i       (rs1_d),
         .rs2_id_i       (rs2_d),
-        .branch_taken_i (branch_taken),
+        .branch_taken_i (comb_branch_taken),
         .cache_stall_i  (dmem_stall_i),
         .mext_stall_i   (mext_stall),
         .stall_if_o     (stall_if),
@@ -295,6 +388,41 @@ module riscv_core (
         .flush_id_o     (flush_id),
         .flush_ex_o     (flush_ex)
     );
+
+    // =========================================================================
+    // CSR register file + trap / interrupt logic
+    // =========================================================================
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            mstatus_r <= 32'b0;
+            mie_r     <= 32'b0;
+            mtvec_r   <= 32'b0;
+            mepc_r    <= 32'b0;
+            mcause_r  <= 32'b0;
+        end else begin
+            // CSR register writes from CSRRW/CSRRS/CSRRC in EX stage
+            if (csr_en) begin
+                case (csr_addr_e)
+                    12'h300: mstatus_r <= csr_wdata_e;
+                    12'h304: mie_r     <= csr_wdata_e;
+                    12'h305: mtvec_r   <= csr_wdata_e;
+                    12'h341: mepc_r    <= csr_wdata_e;
+                    12'h342: mcause_r  <= csr_wdata_e;
+                    default: ;
+                endcase
+            end
+            // Trap entry: save context and redirect to mtvec
+            if (trap_fire) begin
+                mepc_r    <= pc_d;
+                mcause_r  <= trap_mcause;
+                mstatus_r <= mstatus_trap_val;  // MPIE=old_MIE, MIE=0
+            end
+            // MRET: restore interrupt enable
+            if (is_mret_e) begin
+                mstatus_r <= mstatus_mret_val;  // MIE=MPIE, MPIE=1
+            end
+        end
+    end
 
     // =========================================================================
     // M-extension unit
@@ -338,7 +466,10 @@ module riscv_core (
     logic [2:0]  funct3_m;
 
     logic [31:0] ex_result;
-    assign ex_result = is_mext_e ? mext_result : ex_alu_result;
+    // CSR: inject old CSR value as alu_result so writeback writes it to rd
+    assign ex_result = is_csr_e  ? csr_rd_data  :
+                       is_mext_e ? mext_result   :
+                       ex_alu_result;
 
     pipeline_reg_EX_MEM u_ex_mem (
         .clk          (clk),

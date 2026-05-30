@@ -17,6 +17,9 @@ MODULES = {
     "uart":  {"sources": [RTL_DIR / "uart.sv"],  "toplevel": "uart"},
     "gpio":  {"sources": [RTL_DIR / "gpio.sv"],  "toplevel": "gpio"},
     "timer": {"sources": [RTL_DIR / "timer.sv"], "toplevel": "timer"},
+    "spi":   {"sources": [RTL_DIR / "spi.sv"],   "toplevel": "spi"},
+    "clint": {"sources": [RTL_DIR / "clint.sv"], "toplevel": "clint"},
+    "plic":  {"sources": [RTL_DIR / "plic.sv"],  "toplevel": "plic"},
 }
 
 def run(module_name: str, waves: bool = False):
@@ -40,6 +43,6 @@ def run(module_name: str, waves: bool = False):
 
 if __name__ == "__main__":
     if len(sys.argv) not in (2, 3):
-        print("Usage: python run_tests.py <uart|gpio|timer> [--waves]")
+        print("Usage: python run_tests.py <uart|gpio|timer|spi> [--waves]")
         sys.exit(1)
     run(sys.argv[1], waves="--waves" in sys.argv)

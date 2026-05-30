@@ -56,7 +56,15 @@ module pipeline_reg_ID_EX (
 
     // M-extension passthrough
     input  logic        is_mext_i,
-    output logic        is_mext_o
+    output logic        is_mext_o,
+
+    // CSR / MRET passthrough
+    input  logic        is_csr_i,
+    input  logic        is_mret_i,
+    input  logic [11:0] csr_addr_i,
+    output logic        is_csr_o,
+    output logic        is_mret_o,
+    output logic [11:0] csr_addr_o
 );
 
     always_ff @(posedge clk) begin
@@ -80,6 +88,9 @@ module pipeline_reg_ID_EX (
             rs2_o        <= 5'b0;
             rd_o         <= 5'b0;
             is_mext_o    <= 1'b0;
+            is_csr_o     <= 1'b0;
+            is_mret_o    <= 1'b0;
+            csr_addr_o   <= 12'b0;
         end else if (!stall_i) begin
             reg_write_o  <= reg_write_i;
             mem_read_o   <= mem_read_i;
@@ -99,6 +110,9 @@ module pipeline_reg_ID_EX (
             rs2_o        <= rs2_i;
             rd_o         <= rd_i;
             is_mext_o    <= is_mext_i;
+            is_csr_o     <= is_csr_i;
+            is_mret_o    <= is_mret_i;
+            csr_addr_o   <= csr_addr_i;
         end
     end
 

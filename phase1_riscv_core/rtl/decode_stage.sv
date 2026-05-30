@@ -34,7 +34,10 @@ module decode_stage (
     output logic        jump_o,         // is JAL or JALR
     output logic [3:0]  alu_ctrl_o,     // ALU operation (matches alu.sv encodings)
     output logic [1:0]  wb_sel_o,       // writeback mux: 00=ALU 01=MEM 10=PC+4 11=IMM
-    output logic        is_mext_o       // RV32IM M-extension instruction (funct7=0000001)
+    output logic        is_mext_o,      // RV32IM M-extension instruction (funct7=0000001)
+    output logic        is_csr_o,       // CSR instruction (SYSTEM, funct3 != 000)
+    output logic        is_mret_o,      // MRET instruction
+    output logic [11:0] csr_addr_o      // CSR register address (instr[31:20])
 );
 
     // -------------------------------------------------------------------------
@@ -49,6 +52,7 @@ module decode_stage (
     localparam OP_JALR   = 7'b110_0111;
     localparam OP_LUI    = 7'b011_0111;
     localparam OP_AUIPC  = 7'b001_0111;
+    localparam OP_SYSTEM = 7'b111_0011;
 
     // ALU control encodings (must match alu.sv)
     localparam ALU_ADD  = 4'b0000;
@@ -71,11 +75,12 @@ module decode_stage (
     // -------------------------------------------------------------------------
     // Field extraction — assigns outside always_comb (Icarus compat)
     // -------------------------------------------------------------------------
-    logic [6:0] opcode;
-    logic [4:0] rs1, rs2, rd;
-    logic [2:0] funct3;
-    logic [6:0] funct7;
-    logic       funct7_5;   // instr[30]: ADD/SUB and SRL/SRA disambiguation
+    logic [6:0]  opcode;
+    logic [4:0]  rs1, rs2, rd;
+    logic [2:0]  funct3;
+    logic [6:0]  funct7;
+    logic        funct7_5;    // instr[30]: ADD/SUB and SRL/SRA disambiguation
+    logic [11:0] csr_addr;    // CSR address in SYSTEM instructions
 
     assign opcode   = instr_i[6:0];
     assign rd       = instr_i[11:7];
@@ -84,6 +89,8 @@ module decode_stage (
     assign rs2      = instr_i[24:20];
     assign funct7   = instr_i[31:25];
     assign funct7_5 = instr_i[30];
+    assign csr_addr = instr_i[31:20];
+    assign csr_addr_o = csr_addr;
 
     // -------------------------------------------------------------------------
     // Immediate generation (instantiate shared imm_gen)
@@ -118,6 +125,8 @@ module decode_stage (
         jump_o      = 1'b0;
         wb_sel_o    = WB_ALU;
         is_mext_o   = 1'b0;
+        is_csr_o    = 1'b0;
+        is_mret_o   = 1'b0;
 
         case (opcode)
             OP_R:     begin
@@ -162,6 +171,21 @@ module decode_stage (
                 reg_write_o = 1'b1;
                 alu_src_a_o = 1'b1;  // PC as ALU A input → result = PC + imm
                 alu_src_b_o = 1'b1;
+            end
+            OP_SYSTEM: begin
+                if (funct3 != 3'b000) begin
+                    // CSRRW/CSRRS/CSRRC (funct3=001/010/011)
+                    is_csr_o    = 1'b1;
+                    reg_write_o = (rd != 5'b0);  // write old CSR value to rd if rd!=x0
+                    // alu_src_a=0, alu_src_b=0: execute_stage computes rs1+0 = rs1
+                    // riscv_core overrides alu_result with old CSR value for the rd path
+                end else if (csr_addr == 12'h302) begin
+                    // MRET: opcode=SYSTEM, funct3=000, funct12=0x302
+                    is_mret_o   = 1'b1;
+                    jump_o      = 1'b1;  // triggers 2-cycle flush via hazard_unit
+                    alu_src_a_o = 1'b1;  // PC-relative (target overridden in riscv_core)
+                    alu_src_b_o = 1'b1;
+                end
             end
             default: begin end
         endcase
