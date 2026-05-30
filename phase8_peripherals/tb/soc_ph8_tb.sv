@@ -27,19 +27,44 @@ logic        uart_tx;
 logic [15:0] gpio_out, gpio_oe;
 logic [31:0] pc_obs;
 
+logic [31:0] mem_awaddr, mem_wdata, mem_araddr, mem_rdata;
+logic  [3:0] mem_wstrb;
+logic  [1:0] mem_bresp, mem_rresp;
+logic        mem_awvalid, mem_awready, mem_wvalid, mem_wready;
+logic        mem_bvalid, mem_bready, mem_arvalid, mem_arready;
+logic        mem_rvalid, mem_rready;
+
 soc_top dut (
-    .clk        (clk),
-    .rst_n      (rst_n),
-    .uart_tx_o  (uart_tx),
-    .uart_rx_i  (1'b1),
-    .gpio_in_i  (16'h0),
-    .gpio_out_o (gpio_out),
-    .gpio_oe_o  (gpio_oe),
-    .spi_sck_o  (),
-    .spi_mosi_o (),
-    .spi_miso_i (1'b0),
-    .spi_cs_n_o (),
-    .pc_obs_o   (pc_obs)
+    .clk           (clk),
+    .rst_n         (rst_n),
+    .uart_tx_o     (uart_tx),
+    .uart_rx_i     (1'b1),
+    .gpio_in_i     (16'h0),
+    .gpio_out_o    (gpio_out),
+    .gpio_oe_o     (gpio_oe),
+    .spi_sck_o     (),
+    .spi_mosi_o    (),
+    .spi_miso_i    (1'b0),
+    .spi_cs_n_o    (),
+    .pc_obs_o      (pc_obs),
+    .m_mem_awaddr  (mem_awaddr),  .m_mem_awvalid (mem_awvalid), .m_mem_awready (mem_awready),
+    .m_mem_wdata   (mem_wdata),   .m_mem_wstrb   (mem_wstrb),   .m_mem_wvalid  (mem_wvalid),
+    .m_mem_wready  (mem_wready),  .m_mem_bresp   (mem_bresp),   .m_mem_bvalid  (mem_bvalid),
+    .m_mem_bready  (mem_bready),
+    .m_mem_araddr  (mem_araddr),  .m_mem_arvalid (mem_arvalid), .m_mem_arready (mem_arready),
+    .m_mem_rdata   (mem_rdata),   .m_mem_rresp   (mem_rresp),   .m_mem_rvalid  (mem_rvalid),
+    .m_mem_rready  (mem_rready)
+);
+
+axi_sram u_mem (
+    .clk(clk), .rst_n(rst_n),
+    .s_awaddr(mem_awaddr),  .s_awvalid(mem_awvalid), .s_awready(mem_awready),
+    .s_wdata (mem_wdata),   .s_wstrb  (mem_wstrb),   .s_wvalid (mem_wvalid),
+    .s_wready(mem_wready),  .s_bresp  (mem_bresp),   .s_bvalid (mem_bvalid),
+    .s_bready(mem_bready),
+    .s_araddr(mem_araddr),  .s_arvalid(mem_arvalid), .s_arready(mem_arready),
+    .s_rdata (mem_rdata),   .s_rresp  (mem_rresp),   .s_rvalid (mem_rvalid),
+    .s_rready(mem_rready)
 );
 
 // ── Observation state ─────────────────────────────────────────────────────────

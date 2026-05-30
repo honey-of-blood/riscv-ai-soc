@@ -46,7 +46,28 @@ module soc_top (
     output logic        spi_cs_n_o,
 
     // Debug / synthesis keep-alive
-    output logic [31:0] pc_obs_o
+    output logic [31:0] pc_obs_o,
+
+    // ── External memory port (Phase 10+) ─────────────────────────────────────
+    // Crossbar S0 (0x0000_xxxx) exported so the board wrapper or testbench can
+    // connect either mem_bram_backend or mem_ddr3_xilinx.
+    output logic [31:0] m_mem_awaddr,
+    output logic        m_mem_awvalid,
+    input  logic        m_mem_awready,
+    output logic [31:0] m_mem_wdata,
+    output logic  [3:0] m_mem_wstrb,
+    output logic        m_mem_wvalid,
+    input  logic        m_mem_wready,
+    input  logic  [1:0] m_mem_bresp,
+    input  logic        m_mem_bvalid,
+    output logic        m_mem_bready,
+    output logic [31:0] m_mem_araddr,
+    output logic        m_mem_arvalid,
+    input  logic        m_mem_arready,
+    input  logic [31:0] m_mem_rdata,
+    input  logic  [1:0] m_mem_rresp,
+    input  logic        m_mem_rvalid,
+    output logic        m_mem_rready
 );
 
 // ── Instruction memory ────────────────────────────────────────────────────────
@@ -249,15 +270,20 @@ axi4_crossbar u_xbar (
     .s2_rdata (s2_rdata),  .s2_rresp  (s2_rresp),   .s2_rvalid (s2_rvalid),  .s2_rready(s2_rready)
 );
 
-// ── Slave 0: SRAM (0x0000_xxxx) ──────────────────────────────────────────────
-axi_sram u_sram0 (
-    .clk(clk), .rst_n(rst_n),
-    .s_awaddr(s0_awaddr), .s_awvalid(s0_awvalid), .s_awready(s0_awready),
-    .s_wdata (s0_wdata),  .s_wstrb  (s0_wstrb),   .s_wvalid (s0_wvalid),  .s_wready(s0_wready),
-    .s_bresp (s0_bresp),  .s_bvalid (s0_bvalid),  .s_bready (s0_bready),
-    .s_araddr(s0_araddr), .s_arvalid(s0_arvalid), .s_arready(s0_arready),
-    .s_rdata (s0_rdata),  .s_rresp  (s0_rresp),   .s_rvalid (s0_rvalid),  .s_rready(s0_rready)
-);
+// ── Slave 0: External memory port (0x0000_xxxx) ───────────────────────────────
+// Connected to mem_bram_backend (simulation / Basys3) or mem_ddr3_xilinx
+// (Nexys A7 / Arty A7) by the board wrapper or testbench.
+assign m_mem_awaddr  = s0_awaddr;  assign s0_awready = m_mem_awready;
+assign m_mem_awvalid = s0_awvalid;
+assign m_mem_wdata   = s0_wdata;   assign s0_wready  = m_mem_wready;
+assign m_mem_wstrb   = s0_wstrb;
+assign m_mem_wvalid  = s0_wvalid;
+assign s0_bresp      = m_mem_bresp;  assign s0_bvalid = m_mem_bvalid;
+assign m_mem_bready  = s0_bready;
+assign m_mem_araddr  = s0_araddr;  assign s0_arready = m_mem_arready;
+assign m_mem_arvalid = s0_arvalid;
+assign s0_rdata      = m_mem_rdata;  assign s0_rresp = m_mem_rresp;
+assign s0_rvalid     = m_mem_rvalid; assign m_mem_rready = s0_rready;
 
 // ── APB bus (AXI-APB bridge → APB demux) ─────────────────────────────────────
 logic [31:0] apb_paddr;
