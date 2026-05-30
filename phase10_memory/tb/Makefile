@@ -57,9 +57,13 @@ SOC_SRCS := $(PH1)/alu.sv \
             $(PH5)/soc_top.sv \
             $(RTL)/mem_bram_backend.sv
 
-.PHONY: all bram soc_ph10 run_bram run_soc_ph10 waves_bram waves_soc_ph10 clean
+WIDTH_SRCS := $(RTL)/axi_width_32to128.sv
 
-all: bram soc_ph10
+.PHONY: all bram bram_v2 width soc_ph10 \
+        run_bram run_bram_v2 run_width run_soc_ph10 \
+        waves_bram waves_bram_v2 waves_width waves_soc_ph10 clean
+
+all: bram bram_v2 width soc_ph10
 
 bram: $(BUILD)/mem_bram_tb
 $(BUILD)/mem_bram_tb:
@@ -67,6 +71,20 @@ $(BUILD)/mem_bram_tb:
 	verilator $(VFLAGS) --top-module mem_bram_tb \
 	    -o mem_bram_tb --Mdir $(BUILD) \
 	    $(BRAM_SRCS) mem_bram_tb.sv $(abspath bram_main.cpp)
+
+bram_v2: $(BUILD)/mem_bram_tb_v2
+$(BUILD)/mem_bram_tb_v2:
+	mkdir -p $(BUILD)
+	verilator $(VFLAGS) --top-module mem_bram_tb_v2 \
+	    -o mem_bram_tb_v2 --Mdir $(BUILD) \
+	    $(BRAM_SRCS) mem_bram_tb_v2.sv $(abspath bram_v2_main.cpp)
+
+width: $(BUILD)/axi_width_tb
+$(BUILD)/axi_width_tb:
+	mkdir -p $(BUILD)
+	verilator $(VFLAGS) --top-module axi_width_tb \
+	    -o axi_width_tb --Mdir $(BUILD) \
+	    $(WIDTH_SRCS) axi_width_tb.sv $(abspath width_main.cpp)
 
 soc_ph10: $(BUILD)/soc_ph10_tb
 $(BUILD)/soc_ph10_tb:
@@ -79,12 +97,26 @@ $(BUILD)/soc_ph10_tb:
 run_bram: $(BUILD)/mem_bram_tb
 	./$(BUILD)/mem_bram_tb
 
+run_bram_v2: $(BUILD)/mem_bram_tb_v2
+	./$(BUILD)/mem_bram_tb_v2
+
+run_width: $(BUILD)/axi_width_tb
+	./$(BUILD)/axi_width_tb
+
 run_soc_ph10: $(BUILD)/soc_ph10_tb
 	cd $(BUILD) && ./soc_ph10_tb
 
 waves_bram: $(BUILD)/mem_bram_tb
 	./$(BUILD)/mem_bram_tb --fst $(BUILD)/mem_bram.fst
 	gtkwave $(BUILD)/mem_bram.fst &
+
+waves_bram_v2: $(BUILD)/mem_bram_tb_v2
+	./$(BUILD)/mem_bram_tb_v2 --fst $(BUILD)/mem_bram_v2.fst
+	gtkwave $(BUILD)/mem_bram_v2.fst &
+
+waves_width: $(BUILD)/axi_width_tb
+	./$(BUILD)/axi_width_tb --fst $(BUILD)/axi_width.fst
+	gtkwave $(BUILD)/axi_width.fst &
 
 waves_soc_ph10: $(BUILD)/soc_ph10_tb
 	cd $(BUILD) && ./soc_ph10_tb --fst soc_ph10.fst
