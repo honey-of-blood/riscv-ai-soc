@@ -2,6 +2,7 @@ PH1   := ../../phase1_riscv_core/rtl
 PH2   := ../../phase2_cache/rtl
 PH3   := ../../phase3_axi/rtl
 PH4   := ../../phase4_accelerator/rtl
+PH8   := ../../phase8_peripherals/rtl
 RTL   := ../rtl
 FW    := ../fw
 BUILD := ./build
@@ -41,6 +42,13 @@ SRCS := $(PH1)/alu.sv \
         $(RTL)/apb_regs.sv \
         $(RTL)/dmem_axi_adapter.sv \
         $(RTL)/axi4_burst_to_lite.sv \
+        $(PH8)/apb_demux.sv \
+        $(PH8)/uart.sv \
+        $(PH8)/gpio.sv \
+        $(PH8)/timer.sv \
+        $(PH8)/spi.sv \
+        $(PH8)/clint.sv \
+        $(PH8)/plic.sv \
         $(RTL)/soc_top.sv \
         soc_tb.sv
 

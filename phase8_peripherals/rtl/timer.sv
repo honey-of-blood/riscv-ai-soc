@@ -27,7 +27,18 @@ module timer (
     output logic        pready,
 
     // Timer interrupt pending
-    output logic        mtip
+    output logic        mtip,
+
+    // mtime / mtimecmp observability — consumed by CLINT pass-through
+    output logic [31:0] mtime_lo_o,
+    output logic [31:0] mtime_hi_o,
+    output logic [31:0] mtimecmp_lo_o,
+    output logic [31:0] mtimecmp_hi_o,
+
+    // CLINT proxy write: update mtimecmp from CLINT (pulse on mtimecmp_wr_i)
+    input  logic [31:0] mtimecmp_lo_i,
+    input  logic [31:0] mtimecmp_hi_i,
+    input  logic        mtimecmp_wr_i
 );
 
     // -------------------------------------------------------------------------
@@ -58,6 +69,12 @@ module timer (
             if (ctrl[0])
                 mtime <= mtime + 64'd1;
 
+            // CLINT proxy write (takes priority over APB write)
+            if (mtimecmp_wr_i) begin
+                mtimecmp[31:0]  <= mtimecmp_lo_i;
+                mtimecmp[63:32] <= mtimecmp_hi_i;
+            end
+
             // APB writes
             if (psel && penable && pwrite) begin
                 case (apb_addr)
@@ -83,6 +100,10 @@ module timer (
         endcase
     end
 
-    assign pready = 1'b1;
+    assign pready         = 1'b1;
+    assign mtime_lo_o     = mtime[31:0];
+    assign mtime_hi_o     = mtime[63:32];
+    assign mtimecmp_lo_o  = mtimecmp[31:0];
+    assign mtimecmp_hi_o  = mtimecmp[63:32];
 
 endmodule

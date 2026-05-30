@@ -49,8 +49,25 @@ initial begin
 end
 
 // ── DUT ────────────────────────────────────────────────────────────────────────
-logic [31:0] gpio_nc; // synthesis observable output, not checked in sim
-soc_top dut (.clk(clk), .rst_n(rst_n), .gpio_o(gpio_nc));
+logic [31:0] pc_obs_nc;
+soc_top dut (
+    .clk       (clk),
+    .rst_n     (rst_n),
+    // UART (loopback RX=TX for test)
+    .uart_tx_o (),
+    .uart_rx_i (1'b1),
+    // GPIO (inputs = 0)
+    .gpio_in_i (16'h0),
+    .gpio_out_o(),
+    .gpio_oe_o (),
+    // SPI (MISO = 0)
+    .spi_sck_o (),
+    .spi_mosi_o(),
+    .spi_miso_i(1'b0),
+    .spi_cs_n_o(),
+    // Debug
+    .pc_obs_o  (pc_obs_nc)
+);
 
 // ── Stall cycle counter ────────────────────────────────────────────────────────
 always @(posedge clk)
