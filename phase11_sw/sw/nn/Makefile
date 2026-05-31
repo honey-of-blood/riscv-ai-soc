@@ -7,9 +7,12 @@ BUILD    := ./build
 BIN      := $(BUILD)/test_nn
 TOOLS    := ../../tools
 
-.PHONY: all run vectors run_quantize clean
+HEAP_DIR := ../freertos
+HEAP_BIN := $(BUILD)/test_heap
 
-all: $(BIN)
+.PHONY: all run vectors run_quantize run_heap run_all clean
+
+all: $(BIN) $(HEAP_BIN)
 
 vectors: test_vectors.h
 test_vectors.h:
@@ -19,13 +22,21 @@ $(BIN): test_nn.c nn_host.c test_vectors.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) test_nn.c nn_host.c -o $(BIN)
 
+$(HEAP_BIN): $(HEAP_DIR)/test_heap.c $(HEAP_DIR)/heap_4.c
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -I$(HEAP_DIR) \
+	    $(HEAP_DIR)/test_heap.c $(HEAP_DIR)/heap_4.c -o $(HEAP_BIN)
+
 run: $(BIN)
-	@echo ""; @echo "=== C tests ==="; ./$(BIN)
+	@echo ""; @echo "=== C nn tests ==="; ./$(BIN)
+
+run_heap: $(HEAP_BIN)
+	@echo ""; @echo "=== heap_4 allocator tests ==="; ./$(HEAP_BIN)
 
 run_quantize:
 	@echo ""; @echo "=== Python quantize.py tests ==="; python3 $(TOOLS)/test_quantize.py
 
-run_all: run run_quantize
+run_all: run run_heap run_quantize
 
 clean:
 	rm -rf $(BUILD) test_vectors.h

@@ -127,18 +127,15 @@ module riscv_core (
                                 is_mret_e  ? mepc_r   :
                                 branch_target;
 
-    // CSR write data (computed by csr_file from funct3 op)
+    // CSR write data — pass raw operand; csr_file applies the operation.
+    // For CSRRWI/CSRRSI/CSRRCI (funct3[2]=1) the source is the zero-extended
+    // 5-bit uimm encoded in instr[19:15] (same field as rs1).
     logic [31:0] csr_wdata_e;
     logic [1:0]  csr_op_e;
-    assign csr_op_e = funct3_e[1:0];
-    always_comb begin
-        case (csr_op_e)
-            2'b01: csr_wdata_e = ex_rs1_fwd;
-            2'b10: csr_wdata_e = csr_rd_data | ex_rs1_fwd;
-            2'b11: csr_wdata_e = csr_rd_data & ~ex_rs1_fwd;
-            default: csr_wdata_e = ex_rs1_fwd;
-        endcase
-    end
+    logic        is_csri_e;
+    assign csr_op_e    = funct3_e[1:0];
+    assign is_csri_e   = funct3_e[2];
+    assign csr_wdata_e = is_csri_e ? {27'b0, rs1_e} : ex_rs1_fwd;
 
     // Branch/jump resolution from execute stage → fetch stage + hazard unit
     logic        branch_taken;
@@ -514,42 +511,84 @@ module riscv_core (
     logic        mem_read_m, mem_write_m;
     logic [1:0]  wb_sel_m;
     logic [2:0]  funct3_m;
+    // Phase 13: atomic MEM-stage signals
+    logic        is_sc_m, sc_store_en_m, is_amo_m;
+    logic [4:0]  amo_funct5_m;
 
     logic [31:0] ex_result;
-    // CSR: inject old CSR value as alu_result so writeback writes it to rd
+    // SC.W excluded: alu_result_m must carry the store address, not sc_result.
+    // sc_result is routed through imm_i below so wb_sel=WB_IMM picks it up at WB.
     assign ex_result = is_csr_e  ? csr_rd_data  :
-                       is_mext_e ? mext_result   :
+                       is_mext_e ? mext_result  :
                        ex_alu_result;
 
     pipeline_reg_EX_MEM u_ex_mem (
-        .clk          (clk),
-        .rst          (rst),
-        .stall_i      (stall_ex_mem),
-        .alu_result_i (ex_result),
-        .rs2_data_i   (ex_rs2_fwd),
-        .pc_plus4_i   (ex_pc_plus4),
-        .imm_i        (ex_imm),
-        .reg_write_i  (ex_reg_write),
-        .mem_read_i   (ex_mem_read),
-        .mem_write_i  (ex_mem_write),
-        .wb_sel_i     (ex_wb_sel),
-        .funct3_i     (ex_funct3),
-        .rd_i         (ex_rd),
-        .alu_result_o (alu_result_m),
-        .rs2_data_o   (rs2_data_m),
-        .pc_plus4_o   (pc_plus4_m),
-        .imm_o        (imm_m),
-        .reg_write_o  (reg_write_m),
-        .mem_read_o   (mem_read_m),
-        .mem_write_o  (mem_write_m),
-        .wb_sel_o     (wb_sel_m),
-        .funct3_o     (funct3_m),
-        .rd_o         (rd_m)
+        .clk           (clk),
+        .rst           (rst),
+        .stall_i       (stall_ex_mem),
+        .alu_result_i  (ex_result),
+        .rs2_data_i    (ex_rs2_fwd),
+        .pc_plus4_i    (ex_pc_plus4),
+        .imm_i         (is_sc_e ? sc_result : ex_imm),
+        .reg_write_i   (ex_reg_write),
+        .mem_read_i    (ex_mem_read),
+        .mem_write_i   (ex_mem_write),
+        .wb_sel_i      (ex_wb_sel),
+        .funct3_i      (ex_funct3),
+        .rd_i          (ex_rd),
+        .is_sc_i       (is_sc_e),
+        .sc_store_en_i (sc_store_en),
+        .is_amo_i      (is_amo_e),
+        .amo_funct5_i  (amo_funct5_e),
+        .alu_result_o  (alu_result_m),
+        .rs2_data_o    (rs2_data_m),
+        .pc_plus4_o    (pc_plus4_m),
+        .imm_o         (imm_m),
+        .reg_write_o   (reg_write_m),
+        .mem_read_o    (mem_read_m),
+        .mem_write_o   (mem_write_m),
+        .wb_sel_o      (wb_sel_m),
+        .funct3_o      (funct3_m),
+        .rd_o          (rd_m),
+        .is_sc_o       (is_sc_m),
+        .sc_store_en_o (sc_store_en_m),
+        .is_amo_o      (is_amo_m),
+        .amo_funct5_o  (amo_funct5_m)
     );
 
     // =========================================================================
-    // MEM stage
+    // MEM stage: AMO write-data computed here where dmem_rdata_i is valid.
+    // SC.W memory write is gated by sc_store_en_m (captured from EX stage).
     // =========================================================================
+
+    // Signed casts outside always_comb (Icarus rule)
+    logic signed [31:0] amo_mem_s, amo_rs2_s;
+    assign amo_mem_s = $signed(dmem_rdata_i);
+    assign amo_rs2_s = $signed(rs2_data_m);
+
+    logic [31:0] amo_wdata_m;
+    always_comb begin
+        amo_wdata_m = rs2_data_m;  // default: AMOSWAP
+        case (amo_funct5_m)
+            5'b00001: amo_wdata_m = rs2_data_m;
+            5'b00000: amo_wdata_m = dmem_rdata_i + rs2_data_m;
+            5'b00111: amo_wdata_m = dmem_rdata_i & rs2_data_m;
+            5'b00110: amo_wdata_m = dmem_rdata_i | rs2_data_m;
+            5'b00100: amo_wdata_m = dmem_rdata_i ^ rs2_data_m;
+            5'b10000: amo_wdata_m = (amo_mem_s < amo_rs2_s) ? dmem_rdata_i : rs2_data_m;
+            5'b10100: amo_wdata_m = (amo_mem_s > amo_rs2_s) ? dmem_rdata_i : rs2_data_m;
+            5'b11000: amo_wdata_m = (dmem_rdata_i < rs2_data_m) ? dmem_rdata_i : rs2_data_m;
+            5'b11100: amo_wdata_m = (dmem_rdata_i > rs2_data_m) ? dmem_rdata_i : rs2_data_m;
+            default:  amo_wdata_m = rs2_data_m;
+        endcase
+    end
+
+    // SC.W: only write on success (sc_store_en_m captured in EX stage)
+    logic        actual_mem_write_m;
+    logic [31:0] actual_rs2_m;
+    assign actual_mem_write_m = mem_write_m && (!is_sc_m || sc_store_en_m);
+    assign actual_rs2_m       = is_amo_m ? amo_wdata_m : rs2_data_m;
+
     logic [31:0] m_alu_result, m_mem_rdata, m_pc_plus4, m_imm;
     logic        m_reg_write;
     logic [1:0]  m_wb_sel;
@@ -557,12 +596,12 @@ module riscv_core (
 
     memory_stage u_memory (
         .alu_result_i (alu_result_m),
-        .rs2_data_i   (rs2_data_m),
+        .rs2_data_i   (actual_rs2_m),
         .pc_plus4_i   (pc_plus4_m),
         .imm_i        (imm_m),
         .reg_write_i  (reg_write_m),
         .mem_read_i   (mem_read_m),
-        .mem_write_i  (mem_write_m),
+        .mem_write_i  (actual_mem_write_m),
         .wb_sel_i     (wb_sel_m),
         .funct3_i     (funct3_m),
         .rd_i         (rd_m),

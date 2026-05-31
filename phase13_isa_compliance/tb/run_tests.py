@@ -34,7 +34,7 @@ RTL_SOURCES = [
     RTL_DIR / "riscv_core.sv",
 ]
 
-def run(waves=False):
+def run(module="all", waves=False):
     runner = get_runner("icarus")
     runner.build(
         sources=RTL_SOURCES,
@@ -43,9 +43,13 @@ def run(waves=False):
         always=True,
         waves=waves,
     )
+    if module == "all":
+        test_modules = "test_phase13,test_phase13_deep"
+    else:
+        test_modules = module
     runner.test(
         hdl_toplevel="riscv_core",
-        test_module="test_phase13",
+        test_module=test_modules,
         build_dir=BUILD_DIR,
         test_dir=Path(__file__).parent,
         results_xml=str(BUILD_DIR / "results.xml"),
@@ -53,4 +57,8 @@ def run(waves=False):
     )
 
 if __name__ == "__main__":
-    run(waves="--waves" in sys.argv)
+    module = "all"
+    for arg in sys.argv[1:]:
+        if not arg.startswith("--"):
+            module = arg
+    run(module=module, waves="--waves" in sys.argv)

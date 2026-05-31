@@ -210,6 +210,7 @@ module decode_stage (
             end
             OP_AMO: begin   // RV32A
                 reg_write_o = 1'b1;
+                alu_src_b_o = 1'b1;   // addr = rs1 + 0 (imm_gen outputs 0 for OP_AMO)
                 mem_read_o  = 1'b1;   // all AMOs read first
                 wb_sel_o    = WB_MEM; // rd ← old memory value
                 // amo_funct5_o = instr_i[31:27] pre-assigned outside always_comb
@@ -217,7 +218,9 @@ module decode_stage (
                     5'b00010: is_lr_o  = 1'b1;   // LR.W
                     5'b00011: begin               // SC.W
                         is_sc_o     = 1'b1;
-                        mem_write_o = 1'b1;
+                        mem_read_o  = 1'b0;      // SC doesn't read; rd ← sc_result
+                        mem_write_o = 1'b1;      // conditional write (gated in MEM stage)
+                        wb_sel_o    = WB_IMM;    // rd ← sc_result routed through imm channel
                     end
                     default: begin                // AMOSWAP/ADD/AND/OR/XOR/MIN/MAX
                         is_amo_o    = 1'b1;

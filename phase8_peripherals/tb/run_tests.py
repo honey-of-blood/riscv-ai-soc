@@ -14,12 +14,13 @@ RTL_DIR   = Path(__file__).parent.parent / "rtl"
 BUILD_DIR = Path(__file__).parent / "sim_build"
 
 MODULES = {
-    "uart":  {"sources": [RTL_DIR / "uart.sv"],  "toplevel": "uart"},
-    "gpio":  {"sources": [RTL_DIR / "gpio.sv"],  "toplevel": "gpio"},
-    "timer": {"sources": [RTL_DIR / "timer.sv"], "toplevel": "timer"},
-    "spi":   {"sources": [RTL_DIR / "spi.sv"],   "toplevel": "spi"},
-    "clint": {"sources": [RTL_DIR / "clint.sv"], "toplevel": "clint"},
-    "plic":  {"sources": [RTL_DIR / "plic.sv"],  "toplevel": "plic"},
+    "uart":      {"sources": [RTL_DIR / "uart.sv"],      "toplevel": "uart"},
+    "gpio":      {"sources": [RTL_DIR / "gpio.sv"],      "toplevel": "gpio"},
+    "timer":     {"sources": [RTL_DIR / "timer.sv"],     "toplevel": "timer"},
+    "spi":       {"sources": [RTL_DIR / "spi.sv"],       "toplevel": "spi"},
+    "clint":     {"sources": [RTL_DIR / "clint.sv"],     "toplevel": "clint"},
+    "plic":      {"sources": [RTL_DIR / "plic.sv"],      "toplevel": "plic"},
+    "apb_demux": {"sources": [RTL_DIR / "apb_demux.sv"], "toplevel": "apb_demux"},
 }
 
 def run(module_name: str, waves: bool = False):
