@@ -38,11 +38,27 @@ module csr_file (
     output logic [31:0] mtvec_o,
     output logic [31:0] mepc_o,
     output logic [31:0] mcause_o,
-    output logic [31:0] mtval_o
+    output logic [31:0] mtval_o,
+
+    // PMP register outputs for pmp_checker
+    output logic [31:0] pmpcfg0_o,
+    output logic [31:0] pmpcfg1_o,
+    output logic [31:0] pmpaddr0_o,
+    output logic [31:0] pmpaddr1_o,
+    output logic [31:0] pmpaddr2_o,
+    output logic [31:0] pmpaddr3_o,
+    output logic [31:0] pmpaddr4_o,
+    output logic [31:0] pmpaddr5_o,
+    output logic [31:0] pmpaddr6_o,
+    output logic [31:0] pmpaddr7_o
 );
     // -------------------------------------------------------------------------
     // CSR register declarations
     // -------------------------------------------------------------------------
+    // PMP: pmpcfg0 (regions 0-3) at 0x3A0, pmpcfg1 (regions 4-7) at 0x3A1
+    //      pmpaddr0-7 at 0x3B0-0x3B7
+    logic [31:0] pmpcfg_r [2];
+    logic [31:0] pmpaddr_r[8];
     logic [31:0] mstatus_r;
     logic [31:0] mie_r;
     logic [31:0] mtvec_r;
@@ -102,6 +118,16 @@ module csr_file (
             12'hB02: csr_rdata_o = minstret_lo;
             12'hB82: csr_rdata_o = minstret_hi;
             12'hF14: csr_rdata_o = MHARTID_VAL;
+            12'h3A0: csr_rdata_o = pmpcfg_r[0];
+            12'h3A1: csr_rdata_o = pmpcfg_r[1];
+            12'h3B0: csr_rdata_o = pmpaddr_r[0];
+            12'h3B1: csr_rdata_o = pmpaddr_r[1];
+            12'h3B2: csr_rdata_o = pmpaddr_r[2];
+            12'h3B3: csr_rdata_o = pmpaddr_r[3];
+            12'h3B4: csr_rdata_o = pmpaddr_r[4];
+            12'h3B5: csr_rdata_o = pmpaddr_r[5];
+            12'h3B6: csr_rdata_o = pmpaddr_r[6];
+            12'h3B7: csr_rdata_o = pmpaddr_r[7];
             default:  csr_rdata_o = 32'b0;
         endcase
     end
@@ -135,6 +161,11 @@ module csr_file (
             mcounteren_r <= 32'b0;
             mcycle_r     <= 64'b0;
             minstret_r   <= 64'b0;
+            pmpcfg_r[0]  <= 32'b0; pmpcfg_r[1]  <= 32'b0;
+            pmpaddr_r[0] <= 32'b0; pmpaddr_r[1] <= 32'b0;
+            pmpaddr_r[2] <= 32'b0; pmpaddr_r[3] <= 32'b0;
+            pmpaddr_r[4] <= 32'b0; pmpaddr_r[5] <= 32'b0;
+            pmpaddr_r[6] <= 32'b0; pmpaddr_r[7] <= 32'b0;
         end else begin
             // Free-running counters
             mcycle_r   <= mcycle_r + 64'd1;
@@ -161,6 +192,16 @@ module csr_file (
                     12'hB80: mcycle_r[63:32]  <= csr_new;
                     12'hB02: minstret_r[31:0]  <= csr_new;
                     12'hB82: minstret_r[63:32] <= csr_new;
+                    12'h3A0: pmpcfg_r[0]  <= csr_new;
+                    12'h3A1: pmpcfg_r[1]  <= csr_new;
+                    12'h3B0: pmpaddr_r[0] <= csr_new;
+                    12'h3B1: pmpaddr_r[1] <= csr_new;
+                    12'h3B2: pmpaddr_r[2] <= csr_new;
+                    12'h3B3: pmpaddr_r[3] <= csr_new;
+                    12'h3B4: pmpaddr_r[4] <= csr_new;
+                    12'h3B5: pmpaddr_r[5] <= csr_new;
+                    12'h3B6: pmpaddr_r[6] <= csr_new;
+                    12'h3B7: pmpaddr_r[7] <= csr_new;
                     default: ;
                 endcase
             end
@@ -176,5 +217,16 @@ module csr_file (
     assign mepc_o    = mepc_r;
     assign mcause_o  = mcause_r;
     assign mtval_o   = mtval_r;
+
+    assign pmpcfg0_o  = pmpcfg_r[0];
+    assign pmpcfg1_o  = pmpcfg_r[1];
+    assign pmpaddr0_o = pmpaddr_r[0];
+    assign pmpaddr1_o = pmpaddr_r[1];
+    assign pmpaddr2_o = pmpaddr_r[2];
+    assign pmpaddr3_o = pmpaddr_r[3];
+    assign pmpaddr4_o = pmpaddr_r[4];
+    assign pmpaddr5_o = pmpaddr_r[5];
+    assign pmpaddr6_o = pmpaddr_r[6];
+    assign pmpaddr7_o = pmpaddr_r[7];
 
 endmodule

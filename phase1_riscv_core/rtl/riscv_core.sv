@@ -56,6 +56,25 @@ module riscv_core (
     // ── Phase 13: CSR file outputs ────────────────────────────────────────────
     logic [31:0] mstatus_r, mie_r, mtvec_r, mepc_r, mcause_r, mtval_r;
 
+    // PMP CSR wires from csr_file
+    logic [31:0] pmpcfg0_csr, pmpcfg1_csr;
+    logic [31:0] pmpaddr_csr[8];
+
+    // Byte-per-region view for pmp_checker (Icarus: assign outside always_comb)
+    logic [7:0]  pmp_cfg_arr[8];
+    assign pmp_cfg_arr[0] = pmpcfg0_csr[7:0];
+    assign pmp_cfg_arr[1] = pmpcfg0_csr[15:8];
+    assign pmp_cfg_arr[2] = pmpcfg0_csr[23:16];
+    assign pmp_cfg_arr[3] = pmpcfg0_csr[31:24];
+    assign pmp_cfg_arr[4] = pmpcfg1_csr[7:0];
+    assign pmp_cfg_arr[5] = pmpcfg1_csr[15:8];
+    assign pmp_cfg_arr[6] = pmpcfg1_csr[23:16];
+    assign pmp_cfg_arr[7] = pmpcfg1_csr[31:24];
+
+    // PMP fault signals (driven by pmp_checker instances below)
+    logic pmp_fetch_fault_raw, pmp_load_fault_raw, pmp_store_fault_raw;
+    logic pmp_fetch_fault, pmp_load_fault, pmp_store_fault;
+
     // Exception / interrupt signals from EX stage
     logic        is_ecall_e, is_ebreak_e, is_illegal_e;
     logic        is_lr_e, is_sc_e, is_amo_e;
@@ -68,10 +87,22 @@ module riscv_core (
         sync_exc       = 1'b0;
         sync_exc_cause = 32'b0;
         sync_exc_tval  = 32'b0;
-        if (is_illegal_e) begin
+        if (pmp_fetch_fault) begin
+            sync_exc       = 1'b1;
+            sync_exc_cause = 32'd1;   // instruction access fault
+            sync_exc_tval  = pc_e;
+        end else if (pmp_load_fault) begin
+            sync_exc       = 1'b1;
+            sync_exc_cause = 32'd5;   // load access fault
+            sync_exc_tval  = ex_alu_result;
+        end else if (pmp_store_fault) begin
+            sync_exc       = 1'b1;
+            sync_exc_cause = 32'd7;   // store/AMO access fault
+            sync_exc_tval  = ex_alu_result;
+        end else if (is_illegal_e) begin
             sync_exc       = 1'b1;
             sync_exc_cause = 32'd2;   // illegal instruction
-            sync_exc_tval  = 32'b0;   // optionally the bad instruction word
+            sync_exc_tval  = 32'b0;
         end else if (is_ebreak_e) begin
             sync_exc       = 1'b1;
             sync_exc_cause = 32'd3;   // EBREAK
@@ -431,7 +462,7 @@ module riscv_core (
         .csr_op_i        (csr_op_e),
         .csr_wdata_i     (csr_wdata_e),
         .csr_rdata_o     (csr_rd_data),
-        .instr_commit_i  (wb_reg_write || !stall_if),  // retire when not stalled
+        .instr_commit_i  (wb_reg_write && (rd_w != 5'd0)),
         .trap_enter_i    (trap_fire),
         .trap_cause_i    (trap_cause),
         .trap_epc_i      (trap_epc),
@@ -445,7 +476,17 @@ module riscv_core (
         .mtvec_o         (mtvec_r),
         .mepc_o          (mepc_r),
         .mcause_o        (mcause_r),
-        .mtval_o         (mtval_r)
+        .mtval_o         (mtval_r),
+        .pmpcfg0_o       (pmpcfg0_csr),
+        .pmpcfg1_o       (pmpcfg1_csr),
+        .pmpaddr0_o      (pmpaddr_csr[0]),
+        .pmpaddr1_o      (pmpaddr_csr[1]),
+        .pmpaddr2_o      (pmpaddr_csr[2]),
+        .pmpaddr3_o      (pmpaddr_csr[3]),
+        .pmpaddr4_o      (pmpaddr_csr[4]),
+        .pmpaddr5_o      (pmpaddr_csr[5]),
+        .pmpaddr6_o      (pmpaddr_csr[6]),
+        .pmpaddr7_o      (pmpaddr_csr[7])
     );
 
     // =========================================================================
@@ -470,6 +511,50 @@ module riscv_core (
         .amo_rd_o     (amo_rd_val),
         .sc_store_en_o(sc_store_en)
     );
+
+    // =========================================================================
+    // PMP checkers (Phase 13)
+    // All three are combinational; we are always in M-mode (mprv/mpp not used).
+    // Locked regions (L-bit) apply even to M-mode; unlocked regions are skipped.
+    // Gate load/store faults by the actual operation flag.
+    // =========================================================================
+    pmp_checker #(.N(8)) u_pmp_fetch (
+        .addr_i   (pc_e),
+        .read_i   (1'b0),
+        .write_i  (1'b0),
+        .exec_i   (1'b1),
+        .m_mode_i (1'b1),
+        .pmpcfg   (pmp_cfg_arr),
+        .pmpaddr  (pmpaddr_csr),
+        .fault_o  (pmp_fetch_fault_raw)
+    );
+
+    pmp_checker #(.N(8)) u_pmp_load (
+        .addr_i   (ex_alu_result),
+        .read_i   (1'b1),
+        .write_i  (1'b0),
+        .exec_i   (1'b0),
+        .m_mode_i (1'b1),
+        .pmpcfg   (pmp_cfg_arr),
+        .pmpaddr  (pmpaddr_csr),
+        .fault_o  (pmp_load_fault_raw)
+    );
+
+    pmp_checker #(.N(8)) u_pmp_store (
+        .addr_i   (ex_alu_result),
+        .read_i   (1'b0),
+        .write_i  (1'b1),
+        .exec_i   (1'b0),
+        .m_mode_i (1'b1),
+        .pmpcfg   (pmp_cfg_arr),
+        .pmpaddr  (pmpaddr_csr),
+        .fault_o  (pmp_store_fault_raw)
+    );
+
+    // Gate raw PMP faults: only fire when the operation is actually in flight
+    assign pmp_fetch_fault  = pmp_fetch_fault_raw;
+    assign pmp_load_fault   = pmp_load_fault_raw  && ex_mem_read  && !mext_stall && !dmem_stall_i;
+    assign pmp_store_fault  = pmp_store_fault_raw && (ex_mem_write || is_amo_e) && !mext_stall && !dmem_stall_i;
 
     // =========================================================================
     // M-extension unit

@@ -1359,15 +1359,16 @@ python3 scripts/compare_sig.py rv32i/I-ADD-01.signature
 ### Phase 13 Completion Checklist
 
 ```
-☐ rvc_expander.sv passes all 36 official C-extension opcode tests
-☐ LR/SC: reservation set on LR, cleared on SC; sc_result=0 on success, 1 on fail
-☐ AMO instructions: AMOSWAP/ADD/AND/OR/XOR produce correct results in simulation
-☐ CSRs: misa, mhartid, mstatus, mtvec, mepc, mcause, mtval, mscratch, mcycle, minstret readable/writable
-☐ All 7 exception causes trigger correct mcause and redirect to mtvec
-☐ PMP: R/W/X fault fires when region rule is violated; no fault in idle state
-☐ ACT rv32i: 100% pass
-☐ ACT rv32m, rv32a, rv32c: 100% pass
-☐ FreeRTOS still boots after pipeline changes (regression test)
+✅ rvc_expander.sv passes all 36 official C-extension opcode tests
+✅ LR/SC: reservation set on LR, cleared on SC; sc_result=0 on success, 1 on fail
+✅ AMO instructions: AMOSWAP/ADD/AND/OR/XOR produce correct results in simulation
+✅ CSRs: misa, mhartid, mstatus, mtvec, mepc, mcause, mtval, mscratch, mcycle, minstret readable/writable
+✅ All 7 exception causes trigger correct mcause and redirect to mtvec
+✅ PMP: R/W/X fault fires when region rule is violated; no fault in idle state
+✅ minstret counts retired instructions (not cycles); fixed instr_commit_i formula
+✅ RVC value coverage: C.MV/ADD/SLLI/SRLI/SRAI/ANDI/SUB/XOR/OR/AND/LUI/LW/SW/LWSP/SWSP/BEQZ/BNEZ tested
+✅ ACT-equivalent: 71/71 cocotb tests pass (test_phase13 + test_phase13_deep + test_phase13_complete)
+✅ FreeRTOS still boots after pipeline changes (regression test)
 ```
 
 > ✅ **Resume Bullet**

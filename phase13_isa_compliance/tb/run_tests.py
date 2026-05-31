@@ -44,7 +44,7 @@ def run(module="all", waves=False):
         waves=waves,
     )
     if module == "all":
-        test_modules = "test_phase13,test_phase13_deep"
+        test_modules = "test_phase13,test_phase13_deep,test_phase13_complete"
     else:
         test_modules = module
     runner.test(
