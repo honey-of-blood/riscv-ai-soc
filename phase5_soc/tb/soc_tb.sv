@@ -25,12 +25,13 @@
 //    • Slave 2 routing: Accel MMIO (0x5000_xxxx) via adapter → m1
 //    • SRAM0/SRAM1 mem[] hierarchy checks after eviction commitment
 //
-//  Phase 4 — Systolic array accelerator
-//    • First  matmul: W=I,  A=[[1..4],..[13..16]] → Y=A  (all 16 outputs)
-//    • Second matmul: W=2I, same A              → Y=2A (corner outputs a6,a7)
+//  Phase 4/9 — accel_top_v2 systolic array (N=4 vector-matrix)
+//    • Activations written staggered to scratchpad (0x5001_xxxx) directly by CPU
+//    • First  matmul: W=I,  a=[1,2,3,4] → Y=[1,2,3,4]  (4 outputs)
+//    • Second matmul: W=2I, same a      → Y=[2,4,6,8]   (corner outputs a6,a7)
 //    • CTRL lifecycle: start, COMPUTE, done, restart
 //
-// Total checks: 46 (28 existing + 16 y_cap + 2 APB round-trip + 2 CPU regs a6/a7)
+// Total checks: 34 (28 cache/crossbar + 4 y_cap + 2 CPU regs a6/a7)
 // ============================================================================
 
 module soc_tb;
@@ -94,28 +95,28 @@ axi_sram u_mem (
 always @(posedge clk)
     if (rst_n && dut.dmem_stall) stall_cycles++;
 
-// ── Done flag: infinite-loop JAL at PC=0x01f4 ────────────────────────────────
+// ── Done flag: infinite-loop JAL at PC=0x0150 ────────────────────────────────
 logic done_flag;
 initial done_flag = 0;
 always @(posedge clk)
-    if (rst_n && dut.imem_addr == 32'h1f4)
+    if (rst_n && dut.imem_addr == 32'h150)
         done_flag <= 1;
 
 // ============================================================================
-// Phase 4 — capture Y values from MMIO adapter read bus (m1 path, bypasses cache)
-// Addresses: 0x5000_0024 (Y[0][0]) .. 0x5000_0060 (Y[3][3])
+// Phase 4/9 — capture Y values from MMIO adapter read bus (m1 path)
+// Addresses: 0x5000_0100 (Y[0]) .. 0x5000_010C (Y[3])  — accel_top_v2 layout
 // The second matmul overwrites the same Y addresses, so y_cap[] holds the
-// LAST value read at each address = second matmul results (2,4,...,32).
+// LAST value read at each address = second matmul results (2,4,6,8).
 // ============================================================================
-logic [31:0] y_cap [0:15];
-bit          y_valid [0:15];
+logic [31:0] y_cap [0:3];
+bit          y_valid [0:3];
 initial foreach (y_valid[i]) y_valid[i] = 0;
 
 always @(posedge clk) begin
     if (rst_n && dut.u_adapter.m_rvalid && dut.u_adapter.m_rready) begin
         automatic logic [31:0] a = dut.u_adapter.addr_r;
-        if (a >= 32'h5000_0024 && a <= 32'h5000_0060) begin
-            automatic int idx = int'((a - 32'h5000_0024) >> 2);
+        if (a >= 32'h5000_0100 && a <= 32'h5000_010C) begin
+            automatic int idx = int'((a - 32'h5000_0100) >> 2);
             y_cap[idx]   <= dut.u_adapter.m_rdata;
             y_valid[idx] <= 1;
         end
@@ -243,11 +244,11 @@ initial begin
     // ── Phase 3: crossbar slave 0 — SRAM0 memory hierarchy ───────────────────
     $display("");
     $display("─── Ph3     : AXI crossbar → slave 0 (SRAM0) committed data ────");
-    check("SRAM0 mem[0] = 0xAB (eviction committed)",  dut.u_sram0.mem[0],   32'hAB);
-    check("SRAM0 mem[1] = 0xCD",                       dut.u_sram0.mem[1],   32'hCD);
-    check("SRAM0 mem[2] = 0xEF",                       dut.u_sram0.mem[2],   32'hEF);
-    check("SRAM0 mem[3] = 0x12",                       dut.u_sram0.mem[3],   32'h12);
-    check("SRAM0 mem[256]=0x55 (alias line WRITE_BACK)", dut.u_sram0.mem[256], 32'h55);
+    check("SRAM0 mem[0] = 0xAB (eviction committed)",  u_mem.mem[0],   32'hAB);
+    check("SRAM0 mem[1] = 0xCD",                       u_mem.mem[1],   32'hCD);
+    check("SRAM0 mem[2] = 0xEF",                       u_mem.mem[2],   32'hEF);
+    check("SRAM0 mem[3] = 0x12",                       u_mem.mem[3],   32'h12);
+    check("SRAM0 mem[256]=0x55 (alias line WRITE_BACK)", u_mem.mem[256], 32'h55);
 
     // ── Phase 2 + Phase 3: APB bridge (slave 1) full round-trip ──────────────
     $display("");
@@ -275,10 +276,10 @@ initial begin
     check("s0=0xC7 (APB round-trip: write→evict→FILL from APB bridge)",
           dut.u_cpu.u_regfile.regs[8], 32'hC7);
 
-    // ── Phase 4: first matmul — all 16 Y outputs (Y = A, W=identity) ─────────
+    // ── Phase 4/9: first matmul — 4 Y outputs (Y = a, W=identity) ────────────
     $display("");
-    $display("─── Ph4     : 1st matmul (W=I) — all 16 Y outputs ──────────────");
-    // Wait for all Y captures from the first matmul read pass
+    $display("─── Ph4/9   : 1st matmul (W=I) — Y[0..3] bus-captured ─────────");
+    // Wait for all 4 Y captures from the second matmul read pass
     begin
         int wait_cnt = 0;
         bit all_y;
@@ -291,22 +292,21 @@ initial begin
         end
     end
 
-    // y_cap[] holds LAST Y values read = second matmul results (2,4,...,32).
-    // Verify second matmul values here (Y=2A):
+    // y_cap[] holds LAST Y values read = second matmul results (2,4,6,8).
+    // Verify second matmul values (Y = 2*a = [2,4,6,8]):
     begin
-        automatic int exp2 [16] = '{2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32};
-        for (int i = 0; i < 16; i++) begin
-            automatic int m = i / 4, n = i % 4;
-            automatic string lbl = $sformatf("2nd matmul Y[%0d][%0d]=2*A (bus cap)", m, n);
+        automatic int exp2 [4] = '{2, 4, 6, 8};
+        for (int i = 0; i < 4; i++) begin
+            automatic string lbl = $sformatf("2nd matmul Y[%0d]=2*a[%0d] (bus cap)", i, i);
             check(lbl, y_cap[i], 32'(exp2[i]));
         end
     end
 
-    // ── Phase 4: second matmul corner values via CPU regs ─────────────────────
+    // ── Phase 4/9: second matmul corner values via CPU regs ───────────────────
     $display("");
-    $display("─── Ph4     : 2nd matmul (W=2I) — corner Y values in CPU regs ──");
-    check("a6 = Y[0][0] = 2  (2nd matmul, W=2I)", dut.u_cpu.u_regfile.regs[16], 32'd2);
-    check("a7 = Y[3][3] = 32 (2nd matmul, W=2I)", dut.u_cpu.u_regfile.regs[17], 32'd32);
+    $display("─── Ph4/9   : 2nd matmul (W=2I) — corner Y values in CPU regs ─");
+    check("a6 = Y[0] = 2  (2nd matmul, W=2I)", dut.u_cpu.u_regfile.regs[16], 32'd2);
+    check("a7 = Y[3] = 8  (2nd matmul, W=2I)", dut.u_cpu.u_regfile.regs[17], 32'd8);
 
     // ── Stall statistics (informational) ─────────────────────────────────────
     $display("");
@@ -318,8 +318,8 @@ initial begin
     $display("");
     if (error_count == 0) begin
         $display("╔══════════════════════════════════════════════════════════╗");
-        $display("║  ALL 46 CHECKS PASSED — Phase 5 integration complete    ║");
-        $display("║  Ph1 ✓  Ph2 ✓  Ph3+APB ✓  Ph4 ✓  — ready for Phase 6   ║");
+        $display("║  ALL 34 CHECKS PASSED — Phase 5 integration complete    ║");
+        $display("║  Ph1 ✓  Ph2 ✓  Ph3+APB ✓  Ph4/9 ✓  — ready for Ph6+   ║");
         $display("╚══════════════════════════════════════════════════════════╝");
     end else begin
         $display("╔══════════════════════════════════════════════════════════╗");

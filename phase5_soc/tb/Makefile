@@ -3,6 +3,7 @@ PH2   := ../../phase2_cache/rtl
 PH3   := ../../phase3_axi/rtl
 PH4   := ../../phase4_accelerator/rtl
 PH8   := ../../phase8_peripherals/rtl
+PH9   := ../../phase9_accel_v2/rtl
 RTL   := ../rtl
 FW    := ../fw
 BUILD := ./build
@@ -10,9 +11,14 @@ BUILD := ./build
 VLTOR_FLAGS := --sv --timing --top-module soc_tb \
                -Wno-TIMESCALEMOD -Wno-MULTIDRIVEN -Wno-CASEINCOMPLETE \
                -Wno-INITIALDLY -Wno-UNDRIVEN -Wno-UNUSED \
+               -Wno-WIDTHTRUNC -Wno-UNSIGNED \
                --assert --trace-fst --cc --exe --build
 
-SRCS := $(PH1)/alu.sv \
+SRCS := $(PH1)/rvc_expander.sv \
+        $(PH1)/csr_file.sv \
+        $(PH1)/pmp_checker.sv \
+        $(PH1)/atomic_unit.sv \
+        $(PH1)/alu.sv \
         $(PH1)/reg_file.sv \
         $(PH1)/imm_gen.sv \
         $(PH1)/fetch_stage.sv \
@@ -36,8 +42,10 @@ SRCS := $(PH1)/alu.sv \
         $(PH3)/axi_sram.sv \
         $(PH3)/axi_apb_bridge.sv \
         $(PH4)/pe.sv \
-        $(PH4)/systolic_array.sv \
-        $(PH4)/accel_top.sv \
+        $(PH9)/systolic_array.sv \
+        $(PH9)/scratchpad.sv \
+        $(PH9)/accel_top_v2.sv \
+        $(PH9)/dma.sv \
         $(RTL)/instr_rom.sv \
         $(RTL)/apb_regs.sv \
         $(RTL)/dmem_axi_adapter.sv \

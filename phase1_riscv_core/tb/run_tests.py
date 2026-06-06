@@ -18,6 +18,7 @@ BUILD_DIR = Path(__file__).parent / "sim_build"
 MULTI_SRC = {
     "fetch_stage": {
         "sources": [
+            RTL_DIR / "rvc_expander.sv",
             RTL_DIR / "fetch_stage.sv",
             RTL_DIR / "pipeline_reg_IF_ID.sv",
             RTL_DIR / "fetch_if_id_wrap.sv",

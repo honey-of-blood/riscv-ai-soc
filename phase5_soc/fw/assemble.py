@@ -10,10 +10,12 @@ Test coverage (section by section):
   Section 1C : APB bridge explicit round-trip — write unique sentinel to
                0x1000_0020 (cache set 2), force eviction to commit it to
                APB regs, read back via FILL from bridge → s0=0xC7
-  Section 2  : First matmul (W = identity, A = [[1..4],..[13..16]]),
-               CTRL start, CTRL.done poll, all 16 Y reads → SRAM store
-  Section 3  : Second matmul (W = 2×identity, same A),
-               CTRL restart, poll, read Y[0][0] → a6, Y[3][3] → a7
+  Section 2  : First matmul (W = identity, a = [1,2,3,4]) via accel_top_v2.
+               Activations written staggered to scratchpad (0x5001_xxxx).
+               W_row at MMIO offsets 8..20, ACT_BASE=0, Y[0..3] at 0x100..0x10C.
+               Expected: Y = [1,2,3,4].
+  Section 3  : Second matmul (W = 2×identity, same activations).
+               Expected: Y = [2,4,6,8]; a6=Y[0]=2, a7=Y[3]=8.
   Done       : Infinite-loop JAL
 
 Register map at done time (checked by testbench):
@@ -24,8 +26,8 @@ Register map at done time (checked by testbench):
   a4 = 0xA5  (APB slave 1 cache hit — proves crossbar+bridge fill)
   a5 = 0xA5  (APB slave 1 post-eviction read — proves WRITE_BACK+refill via bridge)
   s0 = 0xC7  (APB explicit round-trip: write→evict→FILL from APB regs[8])
-  a6 = 2     (2nd matmul Y[0][0] = 2*A[0][0] = 2*1)
-  a7 = 32    (2nd matmul Y[3][3] = 2*A[3][3] = 2*16)
+  a6 = 2     (2nd matmul Y[0] = 2*a[0] = 2*1)
+  a7 = 8     (2nd matmul Y[3] = 2*a[3] = 2*4)
 """
 
 def lui(rd, imm20):
@@ -173,28 +175,34 @@ for w in li32(t3, 0x10000020): emit(w)  # t3 = 0x1000_0020 again
 emit(lw  (s0, t3, 0))                   # evicts 0x1000_0420, FILLs 0x1000_0020 from APB → s0=0xC7
 
 # =============================================================================
-# SECTION 2 — First matmul: W = identity, A = [[1..4],[5..8],[9..12],[13..16]]
-# Expected: Y = W×A = A → Y[m][n] = 4m + n + 1
+# SECTION 2 — First matmul: W = identity, a = [1,2,3,4]  (accel_top_v2, N=4)
+# Register map: W_row[i] at MMIO+8+4i, ACT_BASE at MMIO+4, Y[i] at MMIO+0x100+4i
+# Activations: staggered diagonal — a[r] in byte r of bank-0 word of scratchpad row r
+#   row 0 @ 0x5001_0000: word = 0x00000001  (byte 0 = 1)
+#   row 1 @ 0x5001_0008: word = 0x00000200  (byte 1 = 2)
+#   row 2 @ 0x5001_0010: word = 0x00030000  (byte 2 = 3)
+#   row 3 @ 0x5001_0018: word = 0x04000000  (byte 3 = 4)
+# Expected: Y[0]=1, Y[1]=2, Y[2]=3, Y[3]=4
 # =============================================================================
 emit(lui(t0, 0x50000))           # t0 = 0x5000_0000 (MMIO base)
 
-# W = identity matrix (packed INT8 per row, little-endian):
-# W_row0={0,0,0,1}=0x00000001  W_row1={0,0,1,0}=0x00000100
-# W_row2={0,1,0,0}=0x00010000  W_row3={1,0,0,0}=0x01000000
-emit(addi(t1, x0, 1));       emit(sw(t1, t0,  4))  # W_row0
-emit(addi(t1, x0, 0x100));   emit(sw(t1, t0,  8))  # W_row1
-emit(lui (t1, 0x10));         emit(sw(t1, t0, 12))  # W_row2
-emit(lui (t1, 0x1000));       emit(sw(t1, t0, 16))  # W_row3
+# W = identity: W_row[r][c]=1 if r==c else 0 (packed little-endian INT8 per row)
+emit(addi(t1, x0,     1)); emit(sw(t1, t0,  8))  # W_row[0]=0x00000001
+emit(addi(t1, x0, 0x100)); emit(sw(t1, t0, 12))  # W_row[1]=0x00000100
+emit(lui (t1, 0x10));       emit(sw(t1, t0, 16))  # W_row[2]=0x00010000
+emit(lui (t1, 0x1000));     emit(sw(t1, t0, 20))  # W_row[3]=0x01000000
 
-# A rows
-for w in li32(t1, 0x04030201): emit(w)
-emit(sw(t1, t0, 20))                                 # A_row0
-for w in li32(t1, 0x08070605): emit(w)
-emit(sw(t1, t0, 24))                                 # A_row1
-for w in li32(t1, 0x0C0B0A09): emit(w)
-emit(sw(t1, t0, 28))                                 # A_row2
-for w in li32(t1, 0x100F0E0D): emit(w)
-emit(sw(t1, t0, 32))                                 # A_row3
+# ACT_BASE = 0 (scratchpad row 0)
+emit(sw(x0, t0, 4))
+
+# Write activations to scratchpad (row stride = 8 bytes in AXI address space)
+for w in li32(t2, 0x50010000): emit(w)           # t2 = 0x5001_0000
+emit(addi(t1, x0,        1)); emit(sw(t1, t2,  0))  # row 0 byte 0 = 1
+emit(addi(t1, x0,    0x200)); emit(sw(t1, t2,  8))  # row 1 byte 1 = 2
+for w in li32(t1,  0x30000): emit(w)
+emit(sw(t1, t2, 16))                                 # row 2 byte 2 = 3
+for w in li32(t1, 0x4000000): emit(w)
+emit(sw(t1, t2, 24))                                 # row 3 byte 3 = 4
 
 # Start accelerator
 emit(addi(t1, x0, 1)); emit(sw(t1, t0, 0))          # CTRL.start = 1
@@ -205,40 +213,26 @@ emit(lw  (t1, t0, 0))
 emit(andi(t1, t1, 2))
 emit(beq (t1, x0, poll1 - pc()))
 
-# Read all 16 Y outputs via MMIO (bypass path) and store to SRAM[0x20..0x5C].
-# Y[0..15] at offsets 0x24, 0x28, ..., 0x60.
-emit(lw(t1,t0,0x24)); emit(sw(t1,x0,0x20))   # Y[0][0]=1
-emit(lw(t1,t0,0x28)); emit(sw(t1,x0,0x24))   # Y[0][1]=2
-emit(lw(t1,t0,0x2C)); emit(sw(t1,x0,0x28))   # Y[0][2]=3
-emit(lw(t1,t0,0x30)); emit(sw(t1,x0,0x2C))   # Y[0][3]=4
-emit(lw(t1,t0,0x34)); emit(sw(t1,x0,0x30))   # Y[1][0]=5
-emit(lw(t1,t0,0x38)); emit(sw(t1,x0,0x34))   # Y[1][1]=6
-emit(lw(t1,t0,0x3C)); emit(sw(t1,x0,0x38))   # Y[1][2]=7
-emit(lw(t1,t0,0x40)); emit(sw(t1,x0,0x3C))   # Y[1][3]=8
-emit(lw(t1,t0,0x44)); emit(sw(t1,x0,0x40))   # Y[2][0]=9
-emit(lw(t1,t0,0x48)); emit(sw(t1,x0,0x44))   # Y[2][1]=10
-emit(lw(t1,t0,0x4C)); emit(sw(t1,x0,0x48))   # Y[2][2]=11
-emit(lw(t1,t0,0x50)); emit(sw(t1,x0,0x4C))   # Y[2][3]=12
-emit(lw(t1,t0,0x54)); emit(sw(t1,x0,0x50))   # Y[3][0]=13
-emit(lw(t1,t0,0x58)); emit(sw(t1,x0,0x54))   # Y[3][1]=14
-emit(lw(t1,t0,0x5C)); emit(sw(t1,x0,0x58))   # Y[3][2]=15
-emit(lw(t1,t0,0x60)); emit(sw(t1,x0,0x5C))   # Y[3][3]=16
+# Read Y[0..3] via MMIO (triggers y_cap bus capture for 1st matmul results)
+emit(lw(t1, t0, 0x100)); emit(lw(t1, t0, 0x104))
+emit(lw(t1, t0, 0x108)); emit(lw(t1, t0, 0x10C))
+
+# Clear ctrl_start so FSM exits DONE_ST → IDLE (required before restart)
+emit(sw(x0, t0, 0))
 
 # =============================================================================
-# SECTION 3 — Second matmul: W = 2×identity, same A
-# Expected: Y = 2A → Y[m][n] = 2*(4m + n + 1)
-# Y[0][0]=2, Y[3][3]=32  (stored in a6, a7 for testbench)
+# SECTION 3 — Second matmul: W = 2×identity, same activations (still in scratchpad)
+# Expected: Y[0]=2, Y[1]=4, Y[2]=6, Y[3]=8
+# a6 = Y[0] = 2, a7 = Y[3] = 8
 # =============================================================================
 # W = 2×I packed per row:
-# W_row0={0,0,0,2}=0x02  W_row1={0,0,2,0}=0x200
-# W_row2={0,2,0,0}=0x20000  W_row3={2,0,0,0}=0x2000000
-emit(addi(t1, x0,  2));       emit(sw(t1, t0,  4))  # W_row0=0x02
-emit(addi(t1, x0,  0x200));   emit(sw(t1, t0,  8))  # W_row1=0x200
-emit(lui (t1, 0x20));          emit(sw(t1, t0, 12))  # W_row2=0x20000
-emit(lui (t1, 0x2000));        emit(sw(t1, t0, 16))  # W_row3=0x2000000
+emit(addi(t1, x0,     2)); emit(sw(t1, t0,  8))  # W_row[0]=0x00000002
+emit(addi(t1, x0, 0x200)); emit(sw(t1, t0, 12))  # W_row[1]=0x00000200
+emit(lui (t1, 0x20));       emit(sw(t1, t0, 16))  # W_row[2]=0x00020000
+emit(lui (t1, 0x2000));     emit(sw(t1, t0, 20))  # W_row[3]=0x02000000
 
-# A unchanged — no need to re-write.
-emit(addi(t1, x0, 1)); emit(sw(t1, t0, 0))           # CTRL.start = 1 (clears done, restarts)
+# A unchanged — activations remain in scratchpad from Section 2
+emit(addi(t1, x0, 1)); emit(sw(t1, t0, 0))          # CTRL.start = 1
 
 # Poll CTRL.done again
 poll2 = pc()
@@ -246,15 +240,13 @@ emit(lw  (t1, t0, 0))
 emit(andi(t1, t1, 2))
 emit(beq (t1, x0, poll2 - pc()))
 
-# Read all 16 Y outputs so y_cap[] bus-capture array gets 2nd-matmul values.
-emit(lw(t1,t0,0x24)); emit(lw(t1,t0,0x28)); emit(lw(t1,t0,0x2C)); emit(lw(t1,t0,0x30))
-emit(lw(t1,t0,0x34)); emit(lw(t1,t0,0x38)); emit(lw(t1,t0,0x3C)); emit(lw(t1,t0,0x40))
-emit(lw(t1,t0,0x44)); emit(lw(t1,t0,0x48)); emit(lw(t1,t0,0x4C)); emit(lw(t1,t0,0x50))
-emit(lw(t1,t0,0x54)); emit(lw(t1,t0,0x58)); emit(lw(t1,t0,0x5C)); emit(lw(t1,t0,0x60))
+# Read Y[0..3] — y_cap[] bus-capture array gets 2nd-matmul values
+emit(lw(t1, t0, 0x100)); emit(lw(t1, t0, 0x104))
+emit(lw(t1, t0, 0x108)); emit(lw(t1, t0, 0x10C))
 
-# Read corner outputs into CPU registers for testbench register check.
-emit(lw(a6, t0, 0x24))          # a6 = Y[0][0] = 2
-emit(lw(a7, t0, 0x60))          # a7 = Y[3][3] = 32
+# Read corner outputs into CPU registers for testbench register check
+emit(lw(a6, t0, 0x100))          # a6 = Y[0] = 2
+emit(lw(a7, t0, 0x10C))          # a7 = Y[3] = 8
 
 # =============================================================================
 # Done sentinel — infinite loop

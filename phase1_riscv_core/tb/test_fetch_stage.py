@@ -4,8 +4,12 @@ from cocotb.triggers import RisingEdge, Timer
 
 # Simple instruction memory model: addr/4 → instruction word
 def imem(addr):
-    """Return a unique word for each word-aligned address (for easy checking)."""
-    return (addr >> 2) + 0xDEAD_0000
+    """Return a unique non-compressed word for each word-aligned address.
+    bits[1:0] must be 0b11 so fetch_stage treats the fetch as a 32-bit instruction
+    (not RVC), keeping PC increments at +4 as these tests expect.
+    """
+    word_idx = (addr >> 2) & 0x3FFF
+    return 0xDEAD0003 | (word_idx << 2)
 
 async def setup(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
