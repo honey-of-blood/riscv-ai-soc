@@ -96,7 +96,33 @@ riscv_core u_cpu (
     .dmem_stall_i  (dmem_stall),
     .m_ext_irq_i   (m_ext_irq),
     .m_timer_irq_i (m_timer_irq),
-    .m_sw_irq_i    (m_sw_irq)
+    .m_sw_irq_i    (m_sw_irq),
+    // Phase 14 debug ports — DM not wired in SoC yet; tie off inputs, leave outputs open
+    .dbg_halt_req_i    (1'b0),
+    .dbg_halted_o      (),
+    .dbg_resume_req_i  (1'b0),
+    .dbg_pc_o          (),
+    .dbg_rf_addr_i     (5'b0),
+    .dbg_rf_rdata_o    (),
+    .dbg_rf_wdata_i    (32'b0),
+    .dbg_rf_we_i       (1'b0),
+    .dbg_imem_ovr_en_i (1'b0),
+    .dbg_imem_ovr_data_i(32'b0),
+    .dbg_jump_en_i     (1'b0),
+    .dbg_jump_target_i (32'b0),
+    .trigger_halt_i    (1'b0),
+    .tselect_we_o      (),
+    .tselect_wd_o      (),
+    .tdata1_we_o       (),
+    .tdata1_wd_o       (),
+    .tdata2_we_o       (),
+    .tdata2_wd_o       (),
+    .tselect_rd_i      (32'b0),
+    .tdata1_rd_i       (32'b0),
+    .tdata2_rd_i       (32'b0),
+    .dbg_mem_addr_o    (),
+    .dbg_mem_we_o      (),
+    .dbg_mem_re_o      ()
 );
 
 // ── Address routing: cache vs MMIO bypass ────────────────────────────────────
