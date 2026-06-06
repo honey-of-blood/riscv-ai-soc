@@ -16,27 +16,34 @@ module fetch_if_id_wrap (
 );
     logic [31:0] pc_if, instr_if;
 
+    logic pred_taken_if_w;
+
     fetch_stage u_fetch (
-        .clk             (clk),
-        .rst             (rst),
-        .stall_i         (stall_i),
-        .branch_taken_i  (branch_taken_i),
-        .branch_target_i (branch_target_i),
-        .imem_addr_o     (imem_addr_o),
-        .imem_rdata_i    (imem_rdata_i),
-        .pc_if_o         (pc_if),
-        .instr_if_o      (instr_if)
+        .clk              (clk),
+        .rst              (rst),
+        .stall_i          (stall_i),
+        .branch_taken_i   (branch_taken_i),
+        .branch_target_i  (branch_target_i),
+        .predict_taken_i  (1'b0),
+        .predict_target_i (32'b0),
+        .pred_taken_o     (pred_taken_if_w),
+        .imem_addr_o      (imem_addr_o),
+        .imem_rdata_i     (imem_rdata_i),
+        .pc_if_o          (pc_if),
+        .instr_if_o       (instr_if)
     );
 
     pipeline_reg_IF_ID u_if_id (
-        .clk       (clk),
-        .rst       (rst),
-        .stall_i   (stall_i),
-        .flush_i   (flush_i),
-        .pc_if_i   (pc_if),
-        .instr_if_i(instr_if),
-        .pc_id_o   (pc_id_o),
-        .instr_id_o(instr_id_o)
+        .clk          (clk),
+        .rst          (rst),
+        .stall_i      (stall_i),
+        .flush_i      (flush_i),
+        .pc_if_i      (pc_if),
+        .instr_if_i   (instr_if),
+        .pred_taken_i (pred_taken_if_w),
+        .pred_taken_o (),
+        .pc_id_o      (pc_id_o),
+        .instr_id_o   (instr_id_o)
     );
 
 endmodule

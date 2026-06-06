@@ -22,6 +22,9 @@ module riscv_core (
     // Cache stall: asserted by L1 cache during a miss; freezes entire pipeline
     input  logic        dmem_stall_i,
 
+    // I-cache miss stall (Phase 15): asserted by icache.cpu_stall_o
+    input  logic        icache_stall_i,
+
     // M-mode interrupt inputs (from PLIC / CLINT)
     input  logic        m_ext_irq_i,    // external interrupt (PLIC)
     input  logic        m_timer_irq_i,  // timer interrupt (CLINT/timer)
@@ -85,7 +88,14 @@ module riscv_core (
     logic        is_lr_d, is_sc_d, is_amo_d;
     logic [4:0]  amo_funct5_d;
 
-    // ── Phase 14: Trigger CSR passthrough wires ───────────────────────────────
+    // ── Phase 15: Branch predictor wires ─────────────────────────────────────
+    logic        bp_predict_taken;
+    logic [31:0] bp_predict_target;
+    logic        pred_taken_if;   // fetch → IF/ID
+    logic        pred_taken_id;   // IF/ID → ID/EX
+    logic        pred_taken_ex;   // ID/EX → EX stage
+
+    // ── Phase 15: Trigger CSR passthrough wires ───────────────────────────────
     // These are also exposed as ports so debug_wrap can connect trigger_module
     logic        tselect_we_w, tdata1_we_w, tdata2_we_w;
     logic [31:0] tselect_wd_w, tdata1_wd_w, tdata2_wd_w;
@@ -228,11 +238,21 @@ module riscv_core (
     logic        comb_branch_taken;
     logic [31:0] comb_branch_target;
     logic        branch_taken_orig;
-    assign branch_taken_orig  = branch_taken;
-    assign comb_branch_taken  = branch_taken_orig || trap_fire || is_mret_e || (dbg_jump_en_i === 1'b1);
+    logic        need_flush_mispred;
+
+    assign branch_taken_orig = branch_taken;
+
+    // Misprediction: predicted taken but branch actually not taken → redirect to fall-through
+    // Only fire when not stalled and not in debug mode, and it's actually a branch in EX.
+    assign need_flush_mispred = pred_taken_ex && branch_e && !branch_taken_orig
+                                && !mext_stall && !dmem_stall_i && !(debug_mode);
+
+    assign comb_branch_taken  = branch_taken_orig || need_flush_mispred
+                                || trap_fire || is_mret_e || (dbg_jump_en_i === 1'b1);
     assign comb_branch_target = (dbg_jump_en_i === 1'b1) ? dbg_jump_target_i :
                                 trap_fire                 ? mtvec_r           :
                                 is_mret_e                 ? mepc_r            :
+                                need_flush_mispred        ? (pc_e + 32'd4)    :
                                 branch_target;
 
     // CSR write data — pass raw operand; csr_file applies the operation.
@@ -270,15 +290,18 @@ module riscv_core (
     logic [31:0] pc_f, instr_f;
 
     fetch_stage u_fetch (
-        .clk             (clk),
-        .rst             (rst),
-        .stall_i         (stall_if),
-        .branch_taken_i  (comb_branch_taken),
-        .branch_target_i (comb_branch_target),
-        .imem_rdata_i    (imem_rdata_use),
-        .imem_addr_o     (imem_addr_o),
-        .pc_if_o         (pc_f),
-        .instr_if_o      (instr_f)
+        .clk              (clk),
+        .rst              (rst),
+        .stall_i          (stall_if),
+        .branch_taken_i   (comb_branch_taken),
+        .branch_target_i  (comb_branch_target),
+        .predict_taken_i  (bp_predict_taken),
+        .predict_target_i (bp_predict_target),
+        .pred_taken_o     (pred_taken_if),
+        .imem_rdata_i     (imem_rdata_use),
+        .imem_addr_o      (imem_addr_o),
+        .pc_if_o          (pc_f),
+        .instr_if_o       (instr_f)
     );
 
     // =========================================================================
@@ -287,14 +310,16 @@ module riscv_core (
     logic [31:0] pc_d, instr_d;
 
     pipeline_reg_IF_ID u_if_id (
-        .clk       (clk),
-        .rst       (rst),
-        .stall_i   (stall_id),
-        .flush_i   (flush_id),
-        .pc_if_i   (pc_f),
-        .instr_if_i(instr_f),
-        .pc_id_o   (pc_d),
-        .instr_id_o(instr_d)
+        .clk         (clk),
+        .rst         (rst),
+        .stall_i     (stall_id),
+        .flush_i     (flush_id),
+        .pc_if_i     (pc_f),
+        .instr_if_i  (instr_f),
+        .pred_taken_i(pred_taken_if),
+        .pred_taken_o(pred_taken_id),
+        .pc_id_o     (pc_d),
+        .instr_id_o  (instr_d)
     );
 
     // =========================================================================
@@ -377,66 +402,68 @@ module riscv_core (
     logic [4:0]  rs1_e, rs2_e, rd_e;
 
     pipeline_reg_ID_EX u_id_ex (
-        .clk         (clk),
-        .rst         (rst),
-        .stall_i     (stall_id_ex),
-        .flush_i     (flush_ex),
-        .reg_write_i (reg_write_d),
-        .mem_read_i  (mem_read_d),
-        .mem_write_i (mem_write_d),
-        .alu_src_b_i (alu_src_b_d),
-        .alu_src_a_i (alu_src_a_d),
-        .branch_i    (branch_d),
-        .jump_i      (jump_d),
-        .alu_ctrl_i  (alu_ctrl_d),
-        .wb_sel_i    (wb_sel_d),
-        .funct3_i    (funct3_d),
-        .rs1_data_i  (rs1_data_d),
-        .rs2_data_i  (rs2_data_d),
-        .imm_i       (imm_d),
-        .pc_i        (pc_d_dec),
-        .rs1_i       (rs1_d),
-        .rs2_i       (rs2_d),
-        .rd_i        (rd_d),
-        .reg_write_o (reg_write_e),
-        .mem_read_o  (mem_read_e),
-        .mem_write_o (mem_write_e),
-        .alu_src_b_o (alu_src_b_e),
-        .alu_src_a_o (alu_src_a_e),
-        .branch_o    (branch_e),
-        .jump_o      (jump_e),
-        .alu_ctrl_o  (alu_ctrl_e),
-        .wb_sel_o    (wb_sel_e),
-        .funct3_o    (funct3_e),
-        .rs1_data_o  (rs1_data_e),
-        .rs2_data_o  (rs2_data_e),
-        .imm_o       (imm_e),
-        .pc_o        (pc_e),
-        .rs1_o       (rs1_e),
-        .rs2_o       (rs2_e),
-        .rd_o        (rd_e),
-        .is_mext_i   (is_mext_d),
-        .is_mext_o   (is_mext_e),
-        .is_csr_i    (is_csr_d),
-        .is_mret_i   (is_mret_d),
-        .csr_addr_i  (csr_addr_d),
-        .is_csr_o    (is_csr_e),
-        .is_mret_o   (is_mret_e),
-        .csr_addr_o  (csr_addr_e),
-        .is_ecall_i  (is_ecall_d),
-        .is_ebreak_i (is_ebreak_d),
-        .is_illegal_i(is_illegal_d),
-        .is_lr_i     (is_lr_d),
-        .is_sc_i     (is_sc_d),
-        .is_amo_i    (is_amo_d),
-        .amo_funct5_i(amo_funct5_d),
-        .is_ecall_o  (is_ecall_e),
-        .is_ebreak_o (is_ebreak_e),
-        .is_illegal_o(is_illegal_e),
-        .is_lr_o     (is_lr_e),
-        .is_sc_o     (is_sc_e),
-        .is_amo_o    (is_amo_e),
-        .amo_funct5_o(amo_funct5_e)
+        .clk          (clk),
+        .rst          (rst),
+        .stall_i      (stall_id_ex),
+        .flush_i      (flush_ex),
+        .reg_write_i  (reg_write_d),
+        .mem_read_i   (mem_read_d),
+        .mem_write_i  (mem_write_d),
+        .alu_src_b_i  (alu_src_b_d),
+        .alu_src_a_i  (alu_src_a_d),
+        .branch_i     (branch_d),
+        .jump_i       (jump_d),
+        .alu_ctrl_i   (alu_ctrl_d),
+        .wb_sel_i     (wb_sel_d),
+        .funct3_i     (funct3_d),
+        .rs1_data_i   (rs1_data_d),
+        .rs2_data_i   (rs2_data_d),
+        .imm_i        (imm_d),
+        .pc_i         (pc_d_dec),
+        .rs1_i        (rs1_d),
+        .rs2_i        (rs2_d),
+        .rd_i         (rd_d),
+        .pred_taken_i (pred_taken_id),
+        .pred_taken_o (pred_taken_ex),
+        .reg_write_o  (reg_write_e),
+        .mem_read_o   (mem_read_e),
+        .mem_write_o  (mem_write_e),
+        .alu_src_b_o  (alu_src_b_e),
+        .alu_src_a_o  (alu_src_a_e),
+        .branch_o     (branch_e),
+        .jump_o       (jump_e),
+        .alu_ctrl_o   (alu_ctrl_e),
+        .wb_sel_o     (wb_sel_e),
+        .funct3_o     (funct3_e),
+        .rs1_data_o   (rs1_data_e),
+        .rs2_data_o   (rs2_data_e),
+        .imm_o        (imm_e),
+        .pc_o         (pc_e),
+        .rs1_o        (rs1_e),
+        .rs2_o        (rs2_e),
+        .rd_o         (rd_e),
+        .is_mext_i    (is_mext_d),
+        .is_mext_o    (is_mext_e),
+        .is_csr_i     (is_csr_d),
+        .is_mret_i    (is_mret_d),
+        .csr_addr_i   (csr_addr_d),
+        .is_csr_o     (is_csr_e),
+        .is_mret_o    (is_mret_e),
+        .csr_addr_o   (csr_addr_e),
+        .is_ecall_i   (is_ecall_d),
+        .is_ebreak_i  (is_ebreak_d),
+        .is_illegal_i (is_illegal_d),
+        .is_lr_i      (is_lr_d),
+        .is_sc_i      (is_sc_d),
+        .is_amo_i     (is_amo_d),
+        .amo_funct5_i (amo_funct5_d),
+        .is_ecall_o   (is_ecall_e),
+        .is_ebreak_o  (is_ebreak_e),
+        .is_illegal_o (is_illegal_e),
+        .is_lr_o      (is_lr_e),
+        .is_sc_o      (is_sc_e),
+        .is_amo_o     (is_amo_e),
+        .amo_funct5_o (amo_funct5_e)
     );
 
     // =========================================================================
@@ -517,21 +544,42 @@ module riscv_core (
     // Hazard unit
     // =========================================================================
     hazard_unit u_hazard (
-        .mem_read_ex_i  (mem_read_e),
-        .rd_ex_i        (rd_e),
-        .rs1_id_i       (rs1_d),
-        .rs2_id_i       (rs2_d),
-        .branch_taken_i (comb_branch_taken),
-        .cache_stall_i  (dmem_stall_i),
-        .mext_stall_i   (mext_stall),
-        .debug_stall_i  (debug_mode),
-        .stall_if_o     (stall_if),
-        .stall_id_o     (stall_id),
-        .stall_id_ex_o  (stall_id_ex),
-        .stall_ex_mem_o (stall_ex_mem),
-        .stall_mem_wb_o (stall_mem_wb),
-        .flush_id_o     (flush_id),
-        .flush_ex_o     (flush_ex)
+        .mem_read_ex_i   (mem_read_e),
+        .rd_ex_i         (rd_e),
+        .rs1_id_i        (rs1_d),
+        .rs2_id_i        (rs2_d),
+        .branch_taken_i  (comb_branch_taken),
+        .cache_stall_i   (dmem_stall_i),
+        .mext_stall_i    (mext_stall),
+        .icache_stall_i  (icache_stall_i),
+        .debug_stall_i   (debug_mode),
+        .stall_if_o      (stall_if),
+        .stall_id_o      (stall_id),
+        .stall_id_ex_o   (stall_id_ex),
+        .stall_ex_mem_o  (stall_ex_mem),
+        .stall_mem_wb_o  (stall_mem_wb),
+        .flush_id_o      (flush_id),
+        .flush_ex_o      (flush_ex)
+    );
+
+    // =========================================================================
+    // Branch predictor (Phase 15)
+    // bp_resolved: fires once per branch/jump committing in EX.
+    // =========================================================================
+    logic bp_resolved;
+    assign bp_resolved = branch_taken_orig
+                       || (branch_e && !mext_stall && !dmem_stall_i && !(icache_stall_i === 1'b1));
+
+    branch_predictor u_bpred (
+        .clk               (clk),
+        .rst_n             (!rst),
+        .pc_if_i           (pc_f),
+        .predict_taken_o   (bp_predict_taken),
+        .predict_target_o  (bp_predict_target),
+        .branch_resolved_i (bp_resolved),
+        .branch_taken_i    (branch_taken_orig),
+        .branch_pc_i       (pc_e),
+        .branch_target_i   (branch_target)
     );
 
     // =========================================================================

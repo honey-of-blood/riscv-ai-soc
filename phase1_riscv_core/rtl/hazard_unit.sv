@@ -37,6 +37,9 @@ module hazard_unit (
     // M-extension divide stall (32-cycle operation in EX stage)
     input  logic        mext_stall_i,
 
+    // I-cache miss stall (Phase 15)
+    input  logic        icache_stall_i,
+
     // Debug stall: core halted by debug module
     input  logic        debug_stall_i,
 
@@ -61,8 +64,8 @@ module hazard_unit (
                     && (rd_ex_i != 5'b0)
                     && ((rd_ex_i == rs1_id_i) || (rd_ex_i == rs2_id_i));
 
-    // Whole-pipeline stall: cache miss OR M-ext divide (both freeze all stages)
-    assign pipe_stall  = cache_stall_i || mext_stall_i;
+    // Whole-pipeline stall: cache miss OR M-ext divide OR I-cache miss (all freeze all stages)
+    assign pipe_stall  = cache_stall_i || mext_stall_i || (icache_stall_i === 1'b1);
     // Debug stall: z-safe case equality check
     assign debug_stall = (debug_stall_i === 1'b1);
 

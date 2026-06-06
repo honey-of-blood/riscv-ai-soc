@@ -15,6 +15,10 @@ module pipeline_reg_IF_ID (
     input  logic [31:0] pc_if_i,
     input  logic [31:0] instr_if_i,
 
+    // Branch predictor passthrough (Phase 15)
+    input  logic        pred_taken_i,
+    output logic        pred_taken_o,
+
     // To decode stage
     output logic [31:0] pc_id_o,
     output logic [31:0] instr_id_o
@@ -23,13 +27,15 @@ module pipeline_reg_IF_ID (
 
     always_ff @(posedge clk) begin
         if (rst || flush_i) begin
-            pc_id_o    <= 32'b0;
-            instr_id_o <= NOP;
+            pc_id_o      <= 32'b0;
+            instr_id_o   <= NOP;
+            pred_taken_o <= 1'b0;
         end else if (!stall_i) begin
-            pc_id_o    <= pc_if_i;
-            instr_id_o <= instr_if_i;
+            pc_id_o      <= pc_if_i;
+            instr_id_o   <= instr_if_i;
+            pred_taken_o <= (pred_taken_i === 1'b1);
         end
-        // stall: implicit — outputs hold their values
+        // stall: implicit — outputs hold their values (including pred_taken_o)
     end
 
 endmodule

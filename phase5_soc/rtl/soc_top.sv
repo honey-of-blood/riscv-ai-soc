@@ -94,6 +94,7 @@ riscv_core u_cpu (
     .dmem_be_o     (dmem_be),
     .dmem_rdata_i  (dmem_rdata),
     .dmem_stall_i  (dmem_stall),
+    .icache_stall_i(1'b0),          // I-cache not wired into SoC yet (Phase 15)
     .m_ext_irq_i   (m_ext_irq),
     .m_timer_irq_i (m_timer_irq),
     .m_sw_irq_i    (m_sw_irq),

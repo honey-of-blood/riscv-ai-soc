@@ -52,6 +52,13 @@ module decode_id_ex_wrap (
     output logic [4:0]  rs2_ex_o,
     output logic [4:0]  rd_ex_o
 );
+    // Internal wires for decode_stage outputs not exposed as top-level ports
+    logic        is_mext_w, is_csr_w, is_mret_w;
+    logic [11:0] csr_addr_w;
+    logic        is_ecall_w, is_ebreak_w, is_illegal_w;
+    logic        is_lr_w, is_sc_w, is_amo_w;
+    logic [4:0]  amo_funct5_w;
+
     decode_stage u_decode (
         .instr_i      (instr_i),
         .pc_i         (pc_i),
@@ -73,7 +80,18 @@ module decode_id_ex_wrap (
         .branch_o     (branch_o),
         .jump_o       (jump_o),
         .alu_ctrl_o   (alu_ctrl_o),
-        .wb_sel_o     (wb_sel_o)
+        .wb_sel_o     (wb_sel_o),
+        .is_mext_o    (is_mext_w),
+        .is_csr_o     (is_csr_w),
+        .is_mret_o    (is_mret_w),
+        .csr_addr_o   (csr_addr_w),
+        .is_ecall_o   (is_ecall_w),
+        .is_ebreak_o  (is_ebreak_w),
+        .is_illegal_o (is_illegal_w),
+        .is_lr_o      (is_lr_w),
+        .is_sc_o      (is_sc_w),
+        .is_amo_o     (is_amo_w),
+        .amo_funct5_o (amo_funct5_w)
     );
 
     pipeline_reg_ID_EX u_id_ex (
@@ -98,6 +116,8 @@ module decode_id_ex_wrap (
         .rs1_i        (rs1_o),
         .rs2_i        (rs2_o),
         .rd_i         (rd_o),
+        .pred_taken_i (1'b0),
+        .pred_taken_o (),
         .reg_write_o  (reg_write_ex_o),
         .mem_read_o   (mem_read_ex_o),
         .mem_write_o  (mem_write_ex_o),
@@ -114,7 +134,30 @@ module decode_id_ex_wrap (
         .pc_o         (pc_ex_o),
         .rs1_o        (rs1_ex_o),
         .rs2_o        (rs2_ex_o),
-        .rd_o         (rd_ex_o)
+        .rd_o         (rd_ex_o),
+        // M-extension, CSR, and exception ports (wired from decode_stage outputs)
+        .is_mext_i    (is_mext_w),
+        .is_mext_o    (),
+        .is_csr_i     (is_csr_w),
+        .is_mret_i    (is_mret_w),
+        .csr_addr_i   (csr_addr_w),
+        .is_csr_o     (),
+        .is_mret_o    (),
+        .csr_addr_o   (),
+        .is_ecall_i   (is_ecall_w),
+        .is_ebreak_i  (is_ebreak_w),
+        .is_illegal_i (is_illegal_w),
+        .is_lr_i      (is_lr_w),
+        .is_sc_i      (is_sc_w),
+        .is_amo_i     (is_amo_w),
+        .amo_funct5_i (amo_funct5_w),
+        .is_ecall_o   (),
+        .is_ebreak_o  (),
+        .is_illegal_o (),
+        .is_lr_o      (),
+        .is_sc_o      (),
+        .is_amo_o     (),
+        .amo_funct5_o ()
     );
 
 endmodule

@@ -15,6 +15,11 @@ module fetch_stage (
     input  logic        branch_taken_i,
     input  logic [31:0] branch_target_i,
 
+    // Branch predictor interface (Phase 15)
+    input  logic        predict_taken_i,   // from branch_predictor
+    input  logic [31:0] predict_target_i,
+    output logic        pred_taken_o,      // to IF/ID register
+
     // Instruction memory interface (async/combinational read, word-aligned)
     output logic [31:0] imem_addr_o,
     input  logic [31:0] imem_rdata_i,
@@ -63,10 +68,17 @@ module fetch_stage (
     logic [31:0] pc_inc;
     assign pc_inc = is_compressed ? 32'd2 : 32'd4;
 
-    // PC mux
+    // pred_taken_o: prediction fired this cycle, unless EX is simultaneously
+    // redirecting (in which case the prediction is moot).
+    // z-safe: treat 'z' on predict_taken_i as 0.
+    assign pred_taken_o = (predict_taken_i === 1'b1) && !branch_taken_i;
+
+    // PC mux (priority: EX branch > BP prediction > sequential)
     always_comb begin
         if (branch_taken_i)
             pc_next = branch_target_i;
+        else if (predict_taken_i === 1'b1)
+            pc_next = predict_target_i;
         else
             pc_next = pc + pc_inc;
     end
@@ -79,6 +91,10 @@ module fetch_stage (
         end else if (!stall_i) begin
             if (branch_taken_i) begin
                 pc        <= branch_target_i;
+                buf_valid <= 1'b0;
+            end else if (predict_taken_i === 1'b1) begin
+                // Branch predictor redirect — clear buffer (same as EX redirect)
+                pc        <= predict_target_i;
                 buf_valid <= 1'b0;
             end else begin
                 pc <= pc_next;

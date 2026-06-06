@@ -54,6 +54,10 @@ module pipeline_reg_ID_EX (
     output logic [4:0]  rs2_o,
     output logic [4:0]  rd_o,
 
+    // Branch predictor passthrough (Phase 15)
+    input  logic        pred_taken_i,
+    output logic        pred_taken_o,
+
     // M-extension passthrough
     input  logic        is_mext_i,
     output logic        is_mext_o,
@@ -103,6 +107,7 @@ module pipeline_reg_ID_EX (
             rs1_o        <= 5'b0;
             rs2_o        <= 5'b0;
             rd_o         <= 5'b0;
+            pred_taken_o <= 1'b0;
             is_mext_o    <= 1'b0;
             is_csr_o     <= 1'b0;
             is_mret_o    <= 1'b0;
@@ -132,6 +137,7 @@ module pipeline_reg_ID_EX (
             rs1_o        <= rs1_i;
             rs2_o        <= rs2_i;
             rd_o         <= rd_i;
+            pred_taken_o <= (pred_taken_i === 1'b1);
             is_mext_o    <= is_mext_i;
             is_csr_o     <= is_csr_i;
             is_mret_o    <= is_mret_i;

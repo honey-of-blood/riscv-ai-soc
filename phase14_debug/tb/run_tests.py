@@ -12,31 +12,33 @@ from cocotb_tools.runner import get_runner
 ROOT     = Path(__file__).parent.parent.parent
 PH1_RTL  = ROOT / "phase1_riscv_core" / "rtl"
 PH14_RTL = Path(__file__).parent.parent / "rtl"
+PH15_RTL = ROOT / "phase15_perf" / "rtl"
 TB_DIR   = Path(__file__).parent
 BUILD_DIR = Path(__file__).parent.parent / "sim_build"
 
 # Common Phase 1 RTL sources (ordered for dependency)
 PH1_SOURCES = [
-    PH1_RTL / "rvc_expander.sv",
-    PH1_RTL / "csr_file.sv",
-    PH1_RTL / "pmp_checker.sv",
-    PH1_RTL / "atomic_unit.sv",
-    PH1_RTL / "alu.sv",
-    PH1_RTL / "reg_file.sv",
-    PH1_RTL / "imm_gen.sv",
-    PH1_RTL / "fetch_stage.sv",
-    PH1_RTL / "pipeline_reg_IF_ID.sv",
-    PH1_RTL / "decode_stage.sv",
-    PH1_RTL / "pipeline_reg_ID_EX.sv",
-    PH1_RTL / "execute_stage.sv",
-    PH1_RTL / "pipeline_reg_EX_MEM.sv",
-    PH1_RTL / "memory_stage.sv",
-    PH1_RTL / "pipeline_reg_MEM_WB.sv",
-    PH1_RTL / "writeback_stage.sv",
-    PH1_RTL / "hazard_unit.sv",
-    PH1_RTL / "forwarding_unit.sv",
-    PH1_RTL / "mext_unit.sv",
-    PH1_RTL / "riscv_core.sv",
+    PH1_RTL  / "rvc_expander.sv",
+    PH1_RTL  / "csr_file.sv",
+    PH1_RTL  / "pmp_checker.sv",
+    PH1_RTL  / "atomic_unit.sv",
+    PH1_RTL  / "alu.sv",
+    PH1_RTL  / "reg_file.sv",
+    PH1_RTL  / "imm_gen.sv",
+    PH1_RTL  / "fetch_stage.sv",
+    PH1_RTL  / "pipeline_reg_IF_ID.sv",
+    PH1_RTL  / "decode_stage.sv",
+    PH1_RTL  / "pipeline_reg_ID_EX.sv",
+    PH1_RTL  / "execute_stage.sv",
+    PH1_RTL  / "pipeline_reg_EX_MEM.sv",
+    PH1_RTL  / "memory_stage.sv",
+    PH1_RTL  / "pipeline_reg_MEM_WB.sv",
+    PH1_RTL  / "writeback_stage.sv",
+    PH1_RTL  / "hazard_unit.sv",
+    PH1_RTL  / "forwarding_unit.sv",
+    PH1_RTL  / "mext_unit.sv",
+    PH15_RTL / "branch_predictor.sv",   # Phase 15: integrated into riscv_core
+    PH1_RTL  / "riscv_core.sv",
 ]
 
 PH14_SOURCES = [

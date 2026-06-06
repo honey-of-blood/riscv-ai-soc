@@ -4,6 +4,7 @@ PH3   := ../../phase3_axi/rtl
 PH4   := ../../phase4_accelerator/rtl
 PH8   := ../../phase8_peripherals/rtl
 PH9   := ../../phase9_accel_v2/rtl
+PH15  := ../../phase15_perf/rtl
 RTL   := ../rtl
 FW    := ../fw
 BUILD := ./build
@@ -33,6 +34,7 @@ SRCS := $(PH1)/rvc_expander.sv \
         $(PH1)/hazard_unit.sv \
         $(PH1)/forwarding_unit.sv \
         $(PH1)/mext_unit.sv \
+        $(PH15)/branch_predictor.sv \
         $(PH1)/riscv_core.sv \
         $(PH2)/cache_tag_array.sv \
         $(PH2)/cache_data_array.sv \
