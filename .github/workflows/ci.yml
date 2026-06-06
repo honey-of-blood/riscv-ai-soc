@@ -1,0 +1,124 @@
+name: SoC CI
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+  workflow_dispatch:
+
+jobs:
+  # ── Cocotb regression ───────────────────────────────────────────────────────
+  cocotb_regression:
+    name: Cocotb regression (Icarus ${{ matrix.phase }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - phase: "Phase 1 core"
+            cmd: "cd phase1_riscv_core/tb && python run_tests.py riscv_core"
+          - phase: "Phase 1 M-ext"
+            cmd: "cd phase1_riscv_core/tb && python run_tests.py m_ext"
+          - phase: "Phase 1 stress"
+            cmd: "cd phase1_riscv_core/tb && python run_tests.py riscv_core_stress"
+          - phase: "Phase 2 cache"
+            cmd: "cd phase2_cache/tb && python run_tests.py cache_top"
+          - phase: "Phase 2 stress"
+            cmd: "cd phase2_cache/tb && python run_tests.py cache_top_stress"
+          - phase: "Phase 3 crossbar"
+            cmd: "cd phase3_axi/tb && python run_tests.py axi4_crossbar"
+          - phase: "Phase 3 stress"
+            cmd: "cd phase3_axi/tb && python run_tests.py axi4_crossbar_stress"
+          - phase: "Phase 8 UART"
+            cmd: "cd phase8_peripherals/tb && python run_tests.py uart"
+          - phase: "Phase 8 GPIO"
+            cmd: "cd phase8_peripherals/tb && python run_tests.py gpio"
+          - phase: "Phase 13 ISA"
+            cmd: "python phase13_isa_compliance/tb/run_tests.py"
+          - phase: "Phase 15 perf"
+            cmd: "python phase15_perf/tb/run_tests.py perf"
+          - phase: "Phase 15 stress"
+            cmd: "python phase15_perf/tb/run_tests.py perf_stress"
+          - phase: "Phase 16 XMODEM"
+            cmd: "python phase16_firmware/tb/run_tests.py"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y iverilog
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cocotb==2.0.1 cocotb-tools
+
+      - name: Run ${{ matrix.phase }}
+        run: ${{ matrix.cmd }}
+
+  # ── Firmware build ──────────────────────────────────────────────────────────
+  firmware_build:
+    name: Firmware build (RISC-V GCC)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RISC-V GCC toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y gcc-riscv64-unknown-elf
+
+      - name: Build bootloader
+        run: |
+          make -C phase16_firmware/sw/bootloader \
+               CROSS=riscv64-unknown-elf \
+               ARCH="-march=rv32imc -mabi=ilp32 -mno-fdiv"
+
+      - name: Build hello-world app
+        run: |
+          riscv64-unknown-elf-gcc \
+            -march=rv32imc -mabi=ilp32 -mno-fdiv \
+            -O2 -Wall -Werror \
+            -T phase16_firmware/sw/bsp/linker_app.ld \
+            -nostartfiles \
+            phase16_firmware/sw/bsp/crt0_app.S \
+            phase16_firmware/sw/bsp/syscalls.c \
+            phase16_firmware/sw/hello/main.c \
+            -o hello.elf
+
+      - name: Check hello.elf size fits in 60 KB app region
+        run: |
+          SIZE=$(riscv64-unknown-elf-size hello.elf | awk 'NR==2 {print $1+$2}')
+          echo "Text+Data = ${SIZE} bytes"
+          [ "$SIZE" -le 61440 ] || (echo "Image too large!" && exit 1)
+
+      - name: Upload bootloader hex as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootloader-hex
+          path: phase16_firmware/sw/bootloader/bootloader.hex
+
+  # ── XMODEM protocol tests (pure Python, no simulator) ──────────────────────
+  xmodem_protocol:
+    name: XMODEM protocol unit tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run XMODEM tests
+        run: python -m pytest phase16_firmware/tb/test_xmodem.py -v
