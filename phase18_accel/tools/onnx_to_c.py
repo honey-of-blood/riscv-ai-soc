@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""ONNX → C weight header exporter for the Phase 18 INT4 accelerator.
+
+Loads a quantised ONNX model (e.g. MobileNetV2 INT8), extracts Conv/Gemm
+weight tensors, requantises to INT4, and emits a C header with packed weight
+arrays compatible with the systolic_array_v3 RTL.
+
+Usage:
+    python onnx_to_c.py model.onnx output_weights.h [--tile-n 4]
+
+The output header declares:
+    const uint16_t LAYER_<name>_weights[n_tiles * patch_elems * TILE_N];
+    const int32_t  LAYER_<name>_bias[OC];
+    const float    LAYER_<name>_scale;   // output scale for requantisation
+"""
+
+import argparse
+import struct
+import sys
+from pathlib import Path
+
+
+# ── INT4 helpers (mirrors int4_pack.h) ───────────────────────────────────
+
+def clamp_int4(x: int) -> int:
+    """Clamp to signed 4-bit range [-8, 7]."""
+    if x > 7:
+        return 7
+    if x < -8:
+        return -8
+    return x
+
+
+def pack_row4(w0: int, w1: int, w2: int, w3: int) -> int:
+    """Pack four INT4 weights into a 16-bit word (w0 in bits[3:0])."""
+    return (
+        ((clamp_int4(w3) & 0xF) << 12) |
+        ((clamp_int4(w2) & 0xF) <<  8) |
+        ((clamp_int4(w1) & 0xF) <<  4) |
+        ((clamp_int4(w0) & 0xF) <<  0)
+    )
+
+
+def quantise_to_int4(arr, scale: float):
+    """Quantise a numpy array to INT4 using the given scale."""
+    result = []
+    for v in arr.flatten():
+        q = int(round(float(v) / scale))
+        result.append(clamp_int4(q))
+    return result
+
+
+def pack_weight_tile(weights_int4, OC: int, patch_elems: int, tile_n: int = 4):
+    """Pack INT4 weight tensor [OC, patch_elems] into tile layout.
+
+    Output layout: [n_tiles][patch_elems][tile_n] packed uint16 rows.
+    Each entry is one packed 16-bit word holding tile_n INT4 weights.
+    """
+    n_tiles = (OC + tile_n - 1) // tile_n
+    packed = []
+    for t in range(n_tiles):
+        for k in range(patch_elems):
+            row = []
+            for r in range(tile_n):
+                oc = t * tile_n + r
+                val = weights_int4[oc * patch_elems + k] if oc < OC else 0
+                row.append(val)
+            # Each 'row' is tile_n=4 INT4 values packed per RTL convention
+            # W_ROW[r] = {w[r][3],w[r][2],w[r][1],w[r][0]}
+            # Here row[r] = w[r][0..tile_n-1] — pack all 4 into one word
+            # For tile_n=4: pack(row[0], row[1], row[2], row[3])
+            while len(row) < 4:
+                row.append(0)
+            packed.append(pack_row4(row[0], row[1], row[2], row[3]))
+    return packed
+
+
+# ── ONNX loader (requires onnxruntime or onnx) ────────────────────────────
+
+def load_onnx_weights(onnx_path: str):
+    """Load weight tensors from an ONNX model.
+
+    Returns dict: {layer_name: {'weights': np.ndarray, 'bias': np.ndarray|None,
+                                'scale': float, 'type': 'conv'|'gemm'}}
+    """
+    try:
+        import onnx
+        import numpy as np
+    except ImportError:
+        print("ERROR: 'onnx' package not found. Install with: pip install onnx",
+              file=sys.stderr)
+        sys.exit(1)
+
+    model = onnx.load(onnx_path)
+    graph = model.graph
+
+    # Build initializer lookup
+    inits = {init.name: init for init in graph.initializer}
+
+    layers = {}
+    for node in graph.node:
+        if node.op_type not in ("Conv", "Gemm", "MatMul"):
+            continue
+
+        name = node.name or node.output[0]
+        name_c = name.replace("/", "_").replace(".", "_").replace("-", "_")
+
+        # Weight tensor (first or second input depending on op)
+        weight_name = node.input[1]
+        if weight_name not in inits:
+            continue
+
+        w_init = inits[weight_name]
+        w = np.frombuffer(w_init.raw_data,
+                          dtype=_onnx_dtype(w_init.data_type)).copy()
+        w = w.reshape([d for d in w_init.dims])
+
+        bias = None
+        if len(node.input) > 2 and node.input[2] in inits:
+            b_init = inits[node.input[2]]
+            bias = np.frombuffer(b_init.raw_data,
+                                 dtype=_onnx_dtype(b_init.data_type)).copy()
+
+        # Determine scale: use max weight / 7 for INT4 range
+        scale = float(np.abs(w).max()) / 7.0 if np.abs(w).max() > 0 else 1.0
+
+        layers[name_c] = {
+            "weights": w,
+            "bias":    bias,
+            "scale":   scale,
+            "type":    node.op_type.lower(),
+        }
+
+    return layers
+
+
+def _onnx_dtype(dtype_int: int):
+    """Convert ONNX DataType enum to numpy dtype."""
+    import numpy as np
+    _MAP = {1: np.float32, 2: np.uint8, 3: np.int8, 5: np.int32,
+            6: np.int64,  7: np.string_, 10: np.float16}
+    return _MAP.get(dtype_int, np.float32)
+
+
+# ── C header emitter ──────────────────────────────────────────────────────
+
+def emit_header(layers: dict, out_path: str, tile_n: int = 4):
+    """Emit a C header with packed INT4 weight arrays for all layers."""
+    lines = [
+        "/* Auto-generated by onnx_to_c.py — DO NOT EDIT */",
+        "#ifndef WEIGHTS_H",
+        "#define WEIGHTS_H",
+        "#include <stdint.h>",
+        "",
+    ]
+
+    for name, layer in layers.items():
+        try:
+            import numpy as np
+        except ImportError:
+            break
+
+        w = layer["weights"]
+        scale = layer["scale"]
+        bias  = layer["bias"]
+
+        # Flatten weights to [OC, patch_elems]
+        OC = w.shape[0]
+        patch_elems = int(w.size) // OC
+
+        w_int4 = quantise_to_int4(w, scale)
+        packed = pack_weight_tile(w_int4, OC, patch_elems, tile_n)
+
+        lines.append(f"/* Layer: {name}  OC={OC} patch_elems={patch_elems} */")
+        lines.append(f"#define LAYER_{name.upper()}_OC          {OC}")
+        lines.append(f"#define LAYER_{name.upper()}_PATCH_ELEMS  {patch_elems}")
+        lines.append(f"#define LAYER_{name.upper()}_SCALE        {scale:.8f}f")
+        lines.append(f"static const uint16_t LAYER_{name.upper()}_WEIGHTS[] = {{")
+        # 8 values per line
+        for i in range(0, len(packed), 8):
+            chunk = packed[i:i+8]
+            lines.append("    " + ", ".join(f"0x{v:04X}" for v in chunk) + ",")
+        lines.append("};")
+
+        if bias is not None:
+            bias_int32 = [int(round(float(b) / (scale * scale))) for b in bias]
+            lines.append(f"static const int32_t LAYER_{name.upper()}_BIAS[] = {{")
+            for i in range(0, len(bias_int32), 8):
+                chunk = bias_int32[i:i+8]
+                lines.append("    " + ", ".join(str(v) for v in chunk) + ",")
+            lines.append("};")
+
+        lines.append("")
+
+    lines += ["#endif /* WEIGHTS_H */", ""]
+
+    Path(out_path).write_text("\n".join(lines))
+    print(f"Wrote {out_path}  ({len(layers)} layers)")
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Export ONNX INT8 weights to C header")
+    parser.add_argument("onnx", help="Input ONNX model path")
+    parser.add_argument("out",  help="Output C header path")
+    parser.add_argument("--tile-n", type=int, default=4,
+                        help="Systolic array tile width N (default 4)")
+    args = parser.parse_args()
+
+    layers = load_onnx_weights(args.onnx)
+    if not layers:
+        print("No Conv/Gemm layers found in model", file=sys.stderr)
+        sys.exit(1)
+    emit_header(layers, args.out, args.tile_n)
+
+
+if __name__ == "__main__":
+    main()
