@@ -50,7 +50,18 @@ module csr_file (
     output logic [31:0] pmpaddr4_o,
     output logic [31:0] pmpaddr5_o,
     output logic [31:0] pmpaddr6_o,
-    output logic [31:0] pmpaddr7_o
+    output logic [31:0] pmpaddr7_o,
+
+    // Trigger module passthrough (0x7A0/7A1/7A2)
+    output logic        tselect_we_o,
+    output logic [31:0] tselect_wd_o,
+    output logic        tdata1_we_o,
+    output logic [31:0] tdata1_wd_o,
+    output logic        tdata2_we_o,
+    output logic [31:0] tdata2_wd_o,
+    input  logic [31:0] tselect_rd_i,
+    input  logic [31:0] tdata1_rd_i,
+    input  logic [31:0] tdata2_rd_i
 );
     // -------------------------------------------------------------------------
     // CSR register declarations
@@ -69,6 +80,10 @@ module csr_file (
     logic [31:0] mcounteren_r;
     logic [63:0] mcycle_r;
     logic [63:0] minstret_r;
+
+    // Debug CSRs (Phase 14)
+    logic [31:0] dcsr_r;    // 0x7B0
+    logic [31:0] dpc_r;     // 0x7B1
 
     // misa: RV32IMAC — MXL=01(RV32), bits A(0),C(2),I(8),M(12)
     localparam [31:0] MISA_VAL = 32'h4014_1101;
@@ -128,6 +143,13 @@ module csr_file (
             12'h3B5: csr_rdata_o = pmpaddr_r[5];
             12'h3B6: csr_rdata_o = pmpaddr_r[6];
             12'h3B7: csr_rdata_o = pmpaddr_r[7];
+            // Trigger CSRs — read from trigger_module
+            12'h7A0: csr_rdata_o = tselect_rd_i;
+            12'h7A1: csr_rdata_o = tdata1_rd_i;
+            12'h7A2: csr_rdata_o = tdata2_rd_i;
+            // Debug CSRs
+            12'h7B0: csr_rdata_o = dcsr_r;
+            12'h7B1: csr_rdata_o = dpc_r;
             default:  csr_rdata_o = 32'b0;
         endcase
     end
@@ -144,6 +166,17 @@ module csr_file (
             default: csr_new = csr_wdata_i;
         endcase
     end
+
+    // -------------------------------------------------------------------------
+    // Trigger passthrough: combinational write-enable/data outputs
+    // Placed after csr_new so assigns can reference it.
+    // -------------------------------------------------------------------------
+    assign tselect_we_o = csr_en_i && (csr_addr_i == 12'h7A0) && (csr_op_i != 2'b00);
+    assign tselect_wd_o = csr_new;
+    assign tdata1_we_o  = csr_en_i && (csr_addr_i == 12'h7A1) && (csr_op_i != 2'b00);
+    assign tdata1_wd_o  = csr_new;
+    assign tdata2_we_o  = csr_en_i && (csr_addr_i == 12'h7A2) && (csr_op_i != 2'b00);
+    assign tdata2_wd_o  = csr_new;
 
     // -------------------------------------------------------------------------
     // Sequential: CSR register updates
@@ -166,6 +199,8 @@ module csr_file (
             pmpaddr_r[2] <= 32'b0; pmpaddr_r[3] <= 32'b0;
             pmpaddr_r[4] <= 32'b0; pmpaddr_r[5] <= 32'b0;
             pmpaddr_r[6] <= 32'b0; pmpaddr_r[7] <= 32'b0;
+            dcsr_r       <= 32'b0;
+            dpc_r        <= 32'b0;
         end else begin
             // Free-running counters
             mcycle_r   <= mcycle_r + 64'd1;
@@ -202,6 +237,10 @@ module csr_file (
                     12'h3B5: pmpaddr_r[5] <= csr_new;
                     12'h3B6: pmpaddr_r[6] <= csr_new;
                     12'h3B7: pmpaddr_r[7] <= csr_new;
+                    // Debug CSRs
+                    12'h7B0: dcsr_r <= csr_new;
+                    12'h7B1: dpc_r  <= csr_new;
+                    // Trigger CSRs handled by passthrough — no local register
                     default: ;
                 endcase
             end

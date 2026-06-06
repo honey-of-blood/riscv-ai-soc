@@ -37,6 +37,9 @@ module hazard_unit (
     // M-extension divide stall (32-cycle operation in EX stage)
     input  logic        mext_stall_i,
 
+    // Debug stall: core halted by debug module
+    input  logic        debug_stall_i,
+
     // --- Stall outputs ---
     output logic        stall_if_o,      // → fetch_stage.stall_i         (hold PC)
     output logic        stall_id_o,      // → pipeline_reg_IF_ID.stall_i  (hold IF/ID)
@@ -50,7 +53,8 @@ module hazard_unit (
 );
 
     logic load_use;
-    logic pipe_stall;  // any whole-pipeline stall (cache miss or M-ext divide)
+    logic pipe_stall;   // any whole-pipeline stall (cache miss or M-ext divide)
+    logic debug_stall;  // debug halt stall
 
     // Load-use: rd_ex must be non-zero and match either source of the ID instruction
     assign load_use = mem_read_ex_i
@@ -58,16 +62,19 @@ module hazard_unit (
                     && ((rd_ex_i == rs1_id_i) || (rd_ex_i == rs2_id_i));
 
     // Whole-pipeline stall: cache miss OR M-ext divide (both freeze all stages)
-    assign pipe_stall = cache_stall_i || mext_stall_i;
+    assign pipe_stall  = cache_stall_i || mext_stall_i;
+    // Debug stall: z-safe case equality check
+    assign debug_stall = (debug_stall_i === 1'b1);
 
     // Suppress flushes during any whole-pipeline stall so a branch sitting in EX
     // does not corrupt frozen IF/ID / ID/EX — the flush fires on resume.
-    assign stall_if_o     = load_use || pipe_stall;
-    assign stall_id_o     = load_use || pipe_stall;
-    assign stall_id_ex_o  = pipe_stall;
-    assign stall_ex_mem_o = pipe_stall;
-    assign stall_mem_wb_o = pipe_stall;
-    assign flush_id_o     = branch_taken_i && !pipe_stall;
-    assign flush_ex_o     = (load_use || branch_taken_i) && !pipe_stall;
+    // Debug stall also suppresses flushes (core frozen in place).
+    assign stall_if_o     = load_use || pipe_stall || debug_stall;
+    assign stall_id_o     = load_use || pipe_stall || debug_stall;
+    assign stall_id_ex_o  = pipe_stall || debug_stall;
+    assign stall_ex_mem_o = pipe_stall || debug_stall;
+    assign stall_mem_wb_o = pipe_stall || debug_stall;
+    assign flush_id_o     = branch_taken_i && !pipe_stall && !debug_stall;
+    assign flush_ex_o     = (load_use || branch_taken_i) && !pipe_stall && !debug_stall;
 
 endmodule

@@ -25,7 +25,39 @@ module riscv_core (
     // M-mode interrupt inputs (from PLIC / CLINT)
     input  logic        m_ext_irq_i,    // external interrupt (PLIC)
     input  logic        m_timer_irq_i,  // timer interrupt (CLINT/timer)
-    input  logic        m_sw_irq_i      // software interrupt (CLINT MSIP)
+    input  logic        m_sw_irq_i,     // software interrupt (CLINT MSIP)
+
+    // Debug interface (from dm_top) — all optional, z-safe
+    input  logic        dbg_halt_req_i,       // DM requests halt
+    output logic        dbg_halted_o,          // core is halted
+    input  logic        dbg_resume_req_i,      // DM requests resume
+    output logic [31:0] dbg_pc_o,              // current EX-stage PC for DM
+    input  logic  [4:0] dbg_rf_addr_i,         // GPR addr for abstract cmd
+    output logic [31:0] dbg_rf_rdata_o,        // GPR read
+    input  logic [31:0] dbg_rf_wdata_i,        // GPR write data
+    input  logic        dbg_rf_we_i,           // GPR write enable
+    // Program buffer execution
+    input  logic        dbg_imem_ovr_en_i,     // override imem rdata
+    input  logic [31:0] dbg_imem_ovr_data_i,   // override data
+    input  logic        dbg_jump_en_i,         // force PC jump
+    input  logic [31:0] dbg_jump_target_i,     // jump target
+    // Trigger
+    input  logic        trigger_halt_i,        // halt from trigger module
+
+    // Trigger CSR interface (passthrough to/from trigger_module)
+    output logic        tselect_we_o,
+    output logic [31:0] tselect_wd_o,
+    output logic        tdata1_we_o,
+    output logic [31:0] tdata1_wd_o,
+    output logic        tdata2_we_o,
+    output logic [31:0] tdata2_wd_o,
+    input  logic [31:0] tselect_rd_i,
+    input  logic [31:0] tdata1_rd_i,
+    input  logic [31:0] tdata2_rd_i,
+    // Trigger compare inputs (from core pipeline)
+    output logic [31:0] dbg_mem_addr_o,        // dmem_addr for trigger watchpoints
+    output logic        dbg_mem_we_o,          // dmem write enable
+    output logic        dbg_mem_re_o           // dmem read enable
 );
 
     // =========================================================================
@@ -52,6 +84,25 @@ module riscv_core (
     logic        is_ecall_d, is_ebreak_d, is_illegal_d;
     logic        is_lr_d, is_sc_d, is_amo_d;
     logic [4:0]  amo_funct5_d;
+
+    // ── Phase 14: Trigger CSR passthrough wires ───────────────────────────────
+    // These are also exposed as ports so debug_wrap can connect trigger_module
+    logic        tselect_we_w, tdata1_we_w, tdata2_we_w;
+    logic [31:0] tselect_wd_w, tdata1_wd_w, tdata2_wd_w;
+    logic [31:0] tselect_rd_w, tdata1_rd_w, tdata2_rd_w;
+    assign tselect_we_o = tselect_we_w;
+    assign tselect_wd_o = tselect_wd_w;
+    assign tdata1_we_o  = tdata1_we_w;
+    assign tdata1_wd_o  = tdata1_wd_w;
+    assign tdata2_we_o  = tdata2_we_w;
+    assign tdata2_wd_o  = tdata2_wd_w;
+    assign tselect_rd_w = tselect_rd_i;
+    assign tdata1_rd_w  = tdata1_rd_i;
+    assign tdata2_rd_w  = tdata2_rd_i;
+    // Mem signals for trigger
+    assign dbg_mem_addr_o = dmem_addr_o;
+    assign dbg_mem_we_o   = dmem_we_o;
+    assign dbg_mem_re_o   = dmem_re_o;
 
     // ── Phase 13: CSR file outputs ────────────────────────────────────────────
     logic [31:0] mstatus_r, mie_r, mtvec_r, mepc_r, mcause_r, mtval_r;
@@ -150,12 +201,38 @@ module riscv_core (
     logic        csr_en;
     assign csr_en = is_csr_e && !mext_stall && !dmem_stall_i;
 
-    // Combined branch/redirect: branch/jump + trap + MRET
+    // =========================================================================
+    // Debug mode (Phase 14)
+    // =========================================================================
+    logic debug_mode;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            debug_mode <= 1'b0;
+        end else if ((dbg_halt_req_i === 1'b1 || trigger_halt_i === 1'b1) && !debug_mode) begin
+            debug_mode <= 1'b1;
+        end else if (dbg_resume_req_i === 1'b1 && debug_mode) begin
+            debug_mode <= 1'b0;
+        end
+    end
+
+    assign dbg_halted_o    = debug_mode;
+    assign dbg_pc_o        = pc_e;
+    // dbg_rf_rdata_o driven directly from u_regfile port below
+
+    // IMEM rdata mux: debug can override with progbuf data
+    logic [31:0] imem_rdata_use;
+    assign imem_rdata_use = (dbg_imem_ovr_en_i === 1'b1) ? dbg_imem_ovr_data_i : imem_rdata_i;
+
+    // Combined branch/redirect: branch/jump + trap + MRET + debug jump
     logic        comb_branch_taken;
     logic [31:0] comb_branch_target;
-    assign comb_branch_taken  = branch_taken || trap_fire || is_mret_e;
-    assign comb_branch_target = trap_fire  ? mtvec_r  :
-                                is_mret_e  ? mepc_r   :
+    logic        branch_taken_orig;
+    assign branch_taken_orig  = branch_taken;
+    assign comb_branch_taken  = branch_taken_orig || trap_fire || is_mret_e || (dbg_jump_en_i === 1'b1);
+    assign comb_branch_target = (dbg_jump_en_i === 1'b1) ? dbg_jump_target_i :
+                                trap_fire                 ? mtvec_r           :
+                                is_mret_e                 ? mepc_r            :
                                 branch_target;
 
     // CSR write data — pass raw operand; csr_file applies the operation.
@@ -198,7 +275,7 @@ module riscv_core (
         .stall_i         (stall_if),
         .branch_taken_i  (comb_branch_taken),
         .branch_target_i (comb_branch_target),
-        .imem_rdata_i    (imem_rdata_i),
+        .imem_rdata_i    (imem_rdata_use),
         .imem_addr_o     (imem_addr_o),
         .pc_if_o         (pc_f),
         .instr_if_o      (instr_f)
@@ -229,15 +306,20 @@ module riscv_core (
     // Register file: async read, sync write, write-before-read for dist-3 RAW
     // Gate we: prevent repeated writes while MEM/WB is frozen during cache stall
     reg_file u_regfile (
-        .clk (clk),
-        .rst (rst),
-        .we  (wb_reg_write && !dmem_stall_i),
-        .rs1 (rs1_d),
-        .rs2 (rs2_d),
-        .rd  (wb_rd),
-        .wd  (wb_data),
-        .rd1 (rf_rd1),
-        .rd2 (rf_rd2)
+        .clk        (clk),
+        .rst        (rst),
+        .we         (wb_reg_write && !dmem_stall_i),
+        .rs1        (rs1_d),
+        .rs2        (rs2_d),
+        .rd         (wb_rd),
+        .wd         (wb_data),
+        .rd1        (rf_rd1),
+        .rd2        (rf_rd2),
+        // Debug port
+        .dbg_addr_i (dbg_rf_addr_i),
+        .dbg_rdata_o(dbg_rf_rdata_o),
+        .dbg_wdata_i(dbg_rf_wdata_i),
+        .dbg_we_i   (dbg_rf_we_i)
     );
 
     logic [4:0]  rd_d;
@@ -442,6 +524,7 @@ module riscv_core (
         .branch_taken_i (comb_branch_taken),
         .cache_stall_i  (dmem_stall_i),
         .mext_stall_i   (mext_stall),
+        .debug_stall_i  (debug_mode),
         .stall_if_o     (stall_if),
         .stall_id_o     (stall_id),
         .stall_id_ex_o  (stall_id_ex),
@@ -486,7 +569,17 @@ module riscv_core (
         .pmpaddr4_o      (pmpaddr_csr[4]),
         .pmpaddr5_o      (pmpaddr_csr[5]),
         .pmpaddr6_o      (pmpaddr_csr[6]),
-        .pmpaddr7_o      (pmpaddr_csr[7])
+        .pmpaddr7_o      (pmpaddr_csr[7]),
+        // Trigger CSR passthrough (Phase 14)
+        .tselect_we_o    (tselect_we_w),
+        .tselect_wd_o    (tselect_wd_w),
+        .tdata1_we_o     (tdata1_we_w),
+        .tdata1_wd_o     (tdata1_wd_w),
+        .tdata2_we_o     (tdata2_we_w),
+        .tdata2_wd_o     (tdata2_wd_w),
+        .tselect_rd_i    (tselect_rd_w),
+        .tdata1_rd_i     (tdata1_rd_w),
+        .tdata2_rd_i     (tdata2_rd_w)
     );
 
     // =========================================================================
