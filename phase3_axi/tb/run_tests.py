@@ -30,6 +30,13 @@ CONFIGS = {
         ],
         "toplevel": "axi4_crossbar",
     },
+    "axi4_crossbar_stress": {
+        "sources":  [
+            RTL_DIR / "axi4_crossbar.sv",
+            RTL_DIR / "axi_sram.sv",
+        ],
+        "toplevel": "axi4_crossbar",
+    },
 }
 
 def run(module_name: str, waves: bool = False):

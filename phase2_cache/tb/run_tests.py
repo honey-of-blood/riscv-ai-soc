@@ -34,6 +34,15 @@ CONFIGS = {
         "sources": [RTL_DIR / "cache_data_array.sv"],
         "toplevel": "cache_data_array",
     },
+    "cache_top_stress": {
+        "sources": [
+            RTL_DIR / "cache_tag_array.sv",
+            RTL_DIR / "cache_data_array.sv",
+            RTL_DIR / "cache_controller.sv",
+            RTL_DIR / "cache_top.sv",
+        ],
+        "toplevel": "cache_top",
+    },
 }
 
 def run(module_name: str, waves: bool = False):

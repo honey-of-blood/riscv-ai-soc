@@ -2,10 +2,14 @@
 Phase 15 test runner — I-cache, branch predictor, fast_mul, integration.
 Usage:
     python run_tests.py              # run all suites
-    python run_tests.py icache       # run a single suite
+    python run_tests.py icache         # run a single suite
+    python run_tests.py icache_stress
     python run_tests.py bpred
+    python run_tests.py bpred_stress
     python run_tests.py fast_mul
+    python run_tests.py fast_mul_stress
     python run_tests.py perf
+    python run_tests.py perf_stress
     python run_tests.py --waves      # all suites with waveform dump
 """
 import sys
@@ -51,6 +55,14 @@ SUITES = {
         "toplevel": "icache_wrap",
         "module":   "test_icache",
     },
+    "icache_stress": {
+        "sources": [
+            PH15 / "icache.sv",
+            TB_DIR / "icache_wrap.sv",
+        ],
+        "toplevel": "icache_wrap",
+        "module":   "test_icache_stress",
+    },
     "bpred": {
         "sources": [
             PH15 / "branch_predictor.sv",
@@ -59,6 +71,14 @@ SUITES = {
         "toplevel": "bpred_wrap",
         "module":   "test_bpred",
     },
+    "bpred_stress": {
+        "sources": [
+            PH15 / "branch_predictor.sv",
+            TB_DIR / "bpred_wrap.sv",
+        ],
+        "toplevel": "bpred_wrap",
+        "module":   "test_bpred_stress",
+    },
     "fast_mul": {
         "sources": [
             PH15 / "fast_mul.sv",
@@ -66,6 +86,14 @@ SUITES = {
         ],
         "toplevel": "mul_wrap",
         "module":   "test_fast_mul",
+    },
+    "fast_mul_stress": {
+        "sources": [
+            PH15 / "fast_mul.sv",
+            TB_DIR / "mul_wrap.sv",
+        ],
+        "toplevel": "mul_wrap",
+        "module":   "test_fast_mul_stress",
     },
     "perf": {
         "sources": PH1_SOURCES + [
@@ -76,6 +104,16 @@ SUITES = {
         ],
         "toplevel": "perf_wrap",
         "module":   "test_perf",
+    },
+    "perf_stress": {
+        "sources": PH1_SOURCES + [
+            PH15 / "icache.sv",
+            PH15 / "branch_predictor.sv",
+            PH15 / "fast_mul.sv",
+            TB_DIR / "perf_wrap.sv",
+        ],
+        "toplevel": "perf_wrap",
+        "module":   "test_perf_stress",
     },
 }
 
@@ -129,4 +167,4 @@ if __name__ == "__main__":
             print(f"\nFailed suites: {failed}")
             sys.exit(1)
         else:
-            print("\nAll Phase 15 suites passed.")
+            print("\nAll Phase 15 suites (including stress) passed.")

@@ -30,15 +30,21 @@ module fast_mul #(
     logic signed [32:0] b_signed_ext;
     logic        [32:0] a_unsigned_ext;
     logic        [32:0] b_unsigned_ext;
+    // MULHSU: both declared signed so Verilog treats multiply as signed×signed.
+    // b_su_ext is zero-extended (bit32=0 → always positive), so semantics are correct.
+    logic signed [32:0] a_su_ext;
+    logic signed [32:0] b_su_ext;
 
     assign a_signed_ext   = {a_i[31], a_i};
     assign b_signed_ext   = {b_i[31], b_i};
     assign a_unsigned_ext = {1'b0,    a_i};
     assign b_unsigned_ext = {1'b0,    b_i};
+    assign a_su_ext       = {a_i[31], a_i};   // signed a
+    assign b_su_ext       = {1'b0,    b_i};   // zero-extended b, declared signed → positive
 
     // Combinational products
-    assign ss_result = a_signed_ext   * b_signed_ext;
-    assign su_result = a_signed_ext   * b_unsigned_ext;
+    assign ss_result = a_signed_ext * b_signed_ext;
+    assign su_result = a_su_ext     * b_su_ext;      // signed×signed: b's sign bit is always 0
     assign uu_result = a_unsigned_ext * b_unsigned_ext;
 
     always_ff @(posedge clk) begin
@@ -62,15 +68,18 @@ module fast_mul #(
 
     logic signed [32:0] a_se, b_se;
     logic        [32:0] a_ue, b_ue;
+    logic signed [32:0] a_su_dsp, b_su_dsp;  // MULHSU: both signed to force signed multiply
 
-    assign a_se = {a_i[31], a_i};
-    assign b_se = {b_i[31], b_i};
-    assign a_ue = {1'b0,    a_i};
-    assign b_ue = {1'b0,    b_i};
+    assign a_se      = {a_i[31], a_i};
+    assign b_se      = {b_i[31], b_i};
+    assign a_ue      = {1'b0,    a_i};
+    assign b_ue      = {1'b0,    b_i};
+    assign a_su_dsp  = {a_i[31], a_i};
+    assign b_su_dsp  = {1'b0,    b_i};
 
-    assign ss_result_dsp = a_se * b_se;
-    assign su_result_dsp = a_se * b_ue;
-    assign uu_result_dsp = a_ue * b_ue;
+    assign ss_result_dsp = a_se     * b_se;
+    assign su_result_dsp = a_su_dsp * b_su_dsp;
+    assign uu_result_dsp = a_ue     * b_ue;
 
     always_ff @(posedge clk) begin
         if (signed_i)
