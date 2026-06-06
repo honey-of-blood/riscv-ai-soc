@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-// APB demux — fans one APB master to 8 peripheral slaves.
+// APB demux — fans one APB master to 12 peripheral slaves.
 // Decode: paddr[15:12] selects the target slave.
 //
 // Address map (within 0x1000_xxxx AXI region):
@@ -11,6 +11,10 @@
 //   sel=5  0x1000_5xxx  CLINT
 //   sel=6  0x1000_6xxx  PLIC
 //   sel=7  0x1000_7xxx  DMA config (Phase 9)
+//   sel=8  0x1000_8xxx  I2C master   (Phase 17)
+//   sel=9  0x1000_9xxx  WDT          (Phase 17)
+//   sel=10 0x1000_Axxx  TRNG         (Phase 17)
+//   sel=11 0x1000_Bxxx  UART_DMA     (Phase 17)
 module apb_demux (
     // From AXI-APB bridge
     input  logic [31:0] paddr,
@@ -94,7 +98,43 @@ module apb_demux (
     output logic        dma_pwrite,
     output logic [31:0] dma_pwdata,
     input  logic [31:0] dma_prdata,
-    input  logic        dma_pready
+    input  logic        dma_pready,
+
+    // Slave 8: I2C master (Phase 17)
+    output logic [11:0] i2c_paddr,
+    output logic        i2c_psel,
+    output logic        i2c_penable,
+    output logic        i2c_pwrite,
+    output logic [31:0] i2c_pwdata,
+    input  logic [31:0] i2c_prdata,
+    input  logic        i2c_pready,
+
+    // Slave 9: WDT (Phase 17)
+    output logic [11:0] wdt_paddr,
+    output logic        wdt_psel,
+    output logic        wdt_penable,
+    output logic        wdt_pwrite,
+    output logic [31:0] wdt_pwdata,
+    input  logic [31:0] wdt_prdata,
+    input  logic        wdt_pready,
+
+    // Slave 10: TRNG (Phase 17)
+    output logic [11:0] trng_paddr,
+    output logic        trng_psel,
+    output logic        trng_penable,
+    output logic        trng_pwrite,
+    output logic [31:0] trng_pwdata,
+    input  logic [31:0] trng_prdata,
+    input  logic        trng_pready,
+
+    // Slave 11: UART_DMA (Phase 17)
+    output logic [11:0] uart_dma_paddr,
+    output logic        uart_dma_psel,
+    output logic        uart_dma_penable,
+    output logic        uart_dma_pwrite,
+    output logic [31:0] uart_dma_pwdata,
+    input  logic [31:0] uart_dma_prdata,
+    input  logic        uart_dma_pready
 );
 
     // Address decode — bits [15:12] for slave select
@@ -112,7 +152,11 @@ module apb_demux (
     assign spi_psel   = psel & (sel == 4'd4);
     assign clint_psel = psel & (sel == 4'd5);
     assign plic_psel  = psel & (sel == 4'd6);
-    assign dma_psel   = psel & (sel == 4'd7);
+    assign dma_psel      = psel & (sel == 4'd7);
+    assign i2c_psel      = psel & (sel == 4'd8);
+    assign wdt_psel      = psel & (sel == 4'd9);
+    assign trng_psel     = psel & (sel == 4'd10);
+    assign uart_dma_psel = psel & (sel == 4'd11);
 
     // Broadcast shared signals
     assign regs_paddr  = local_addr;  assign regs_penable  = penable;
@@ -129,8 +173,16 @@ module apb_demux (
     assign clint_pwrite = pwrite;     assign clint_pwdata  = pwdata;
     assign plic_paddr  = local_addr;  assign plic_penable  = penable;
     assign plic_pwrite = pwrite;      assign plic_pwdata   = pwdata;
-    assign dma_paddr   = local_addr;  assign dma_penable   = penable;
-    assign dma_pwrite  = pwrite;      assign dma_pwdata    = pwdata;
+    assign dma_paddr      = local_addr;  assign dma_penable      = penable;
+    assign dma_pwrite     = pwrite;      assign dma_pwdata       = pwdata;
+    assign i2c_paddr      = local_addr;  assign i2c_penable      = penable;
+    assign i2c_pwrite     = pwrite;      assign i2c_pwdata       = pwdata;
+    assign wdt_paddr      = local_addr;  assign wdt_penable      = penable;
+    assign wdt_pwrite     = pwrite;      assign wdt_pwdata       = pwdata;
+    assign trng_paddr     = local_addr;  assign trng_penable     = penable;
+    assign trng_pwrite    = pwrite;      assign trng_pwdata      = pwdata;
+    assign uart_dma_paddr = local_addr;  assign uart_dma_penable = penable;
+    assign uart_dma_pwrite = pwrite;     assign uart_dma_pwdata  = pwdata;
 
     // prdata / pready / pslverr mux
     always_comb begin
@@ -145,7 +197,11 @@ module apb_demux (
             4'd4: begin prdata = spi_prdata;   pready = spi_pready;   end
             4'd5: begin prdata = clint_prdata; pready = clint_pready; end
             4'd6: begin prdata = plic_prdata;  pready = plic_pready;  end
-            4'd7: begin prdata = dma_prdata;   pready = dma_pready;   end
+            4'd7:  begin prdata = dma_prdata;      pready = dma_pready;      end
+            4'd8:  begin prdata = i2c_prdata;      pready = i2c_pready;      end
+            4'd9:  begin prdata = wdt_prdata;      pready = wdt_pready;      end
+            4'd10: begin prdata = trng_prdata;     pready = trng_pready;     end
+            4'd11: begin prdata = uart_dma_prdata; pready = uart_dma_pready; end
             default: ;
         endcase
     end
