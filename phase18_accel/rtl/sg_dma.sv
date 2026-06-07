@@ -196,8 +196,9 @@ always_ff @(posedge clk or negedge rst_n) begin
                         xfer_cnt  <= 32'd0;
                         src_ptr   <= src_addr_r;
                         dst_ptr   <= dst_addr_r;
-                        // byte_count_r known from fetch_cnt=2 edge (already latched)
-                        state     <= S_XFER_RD;
+                        // byte_count_r known from fetch_cnt=2 edge (already latched).
+                        // Skip transfer entirely when byte_count=0 (null descriptor).
+                        state     <= (byte_count_r == 32'd0) ? S_CHAIN : S_XFER_RD;
                     end else begin
                         fetch_cnt <= fetch_cnt + 3'd1;
                     end

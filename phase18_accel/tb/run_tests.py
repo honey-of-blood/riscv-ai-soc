@@ -2,9 +2,12 @@
 """Phase 18 — AI accelerator v3 test runner.
 
 RTL suites (cocotb + Icarus):
-    pe_int4       — INT4/INT8 processing element
-    systolic_v3   — N×N systolic array with APB interface
-    sg_dma        — scatter-gather DMA engine
+    pe_int4           — INT4/INT8 processing element
+    pe_int4_stress    — full 256-pair sweep, accumulation, reset, pipeline
+    systolic_v3       — N×N systolic array with APB interface
+    systolic_v3_stress — nontrivial matrices, negative weights, random sweep
+    sg_dma            — scatter-gather DMA engine
+    sg_dma_stress     — 4-chain, byte_count=0, large xfer, fixed addr, abort
 
 Python suites (unittest, no cocotb):
     ops_py        — operator library reference algorithms
@@ -14,7 +17,7 @@ Run all:
     python run_tests.py
 
 Run one suite:
-    python run_tests.py pe_int4
+    python run_tests.py pe_int4_stress
     python run_tests.py ops_py
 """
 import sys
@@ -34,14 +37,26 @@ RTL_SUITES = [
      ["pe_int4.sv"],
      "pe_int4",
      "test_pe_int4"),
+    ("pe_int4_stress",
+     ["pe_int4.sv"],
+     "pe_int4",
+     "test_pe_int4_stress"),
     ("systolic_v3",
      ["pe_int4.sv", "systolic_array_v3.sv"],
      "systolic_array_v3",
      "test_systolic_v3"),
+    ("systolic_v3_stress",
+     ["pe_int4.sv", "systolic_array_v3.sv"],
+     "systolic_array_v3",
+     "test_systolic_v3_stress"),
     ("sg_dma",
      ["sg_dma.sv"],
      "sg_dma",
      "test_sg_dma"),
+    ("sg_dma_stress",
+     ["sg_dma.sv"],
+     "sg_dma",
+     "test_sg_dma_stress"),
 ]
 
 # Pure Python suites (module name relative to TB)
