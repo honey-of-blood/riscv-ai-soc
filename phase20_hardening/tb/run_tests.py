@@ -13,6 +13,9 @@ Run one suite:
     python run_tests.py crossbar
     python run_tests.py cru
     python run_tests.py dft
+    python run_tests.py crossbar_stress
+    python run_tests.py cru_stress
+    python run_tests.py dft_stress
 """
 import sys, os, subprocess
 from pathlib import Path
@@ -23,10 +26,14 @@ TB   = ROOT / "phase20_hardening" / "tb"
 VENV = str(ROOT / ".venv" / "bin" / "python")
 
 RTL_SUITES = [
-    ("crossbar", ["axi4_crossbar_param.sv", "crossbar_3m4s_wrap.sv"],
-                  "crossbar_3m4s_wrap",  "test_crossbar_param"),
-    ("cru",      ["cru.sv"],             "cru",                 "test_cru"),
-    ("dft",      ["dft_top.sv"],         "dft_top",             "test_dft"),
+    ("crossbar",         ["axi4_crossbar_param.sv", "crossbar_3m4s_wrap.sv"],
+                          "crossbar_3m4s_wrap",  "test_crossbar_param"),
+    ("cru",              ["cru.sv"],             "cru",                 "test_cru"),
+    ("dft",              ["dft_top.sv"],         "dft_top",             "test_dft"),
+    ("crossbar_stress",  ["axi4_crossbar_param.sv", "crossbar_3m4s_wrap.sv"],
+                          "crossbar_3m4s_wrap",  "test_crossbar_stress"),
+    ("cru_stress",       ["cru.sv"],             "cru",                 "test_cru_stress"),
+    ("dft_stress",       ["dft_top.sv"],         "dft_top",             "test_dft_stress"),
 ]
 
 
