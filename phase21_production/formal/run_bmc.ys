@@ -1,0 +1,57 @@
+# Phase 21 — Yosys BMC script for riscv_core.sv SVA properties
+#
+# Run with:
+#   sby -f run_bmc.ys
+# Requires: yosys + symbiyosys (sby) + boolector/yices2
+
+[options]
+mode bmc
+depth 30          # 30-cycle bounded check (adjust upward for longer proofs)
+multiclock off
+
+[engines]
+smtbmc boolector
+
+[script]
+# Read RTL sources
+read -sv ../../phase1_riscv_core/rtl/alu.sv
+read -sv ../../phase1_riscv_core/rtl/reg_file.sv
+read -sv ../../phase1_riscv_core/rtl/imm_gen.sv
+read -sv ../../phase1_riscv_core/rtl/fetch_stage.sv
+read -sv ../../phase1_riscv_core/rtl/pipeline_reg_IF_ID.sv
+read -sv ../../phase1_riscv_core/rtl/decode_stage.sv
+read -sv ../../phase1_riscv_core/rtl/pipeline_reg_ID_EX.sv
+read -sv ../../phase1_riscv_core/rtl/execute_stage.sv
+read -sv ../../phase1_riscv_core/rtl/pipeline_reg_EX_MEM.sv
+read -sv ../../phase1_riscv_core/rtl/memory_stage.sv
+read -sv ../../phase1_riscv_core/rtl/pipeline_reg_MEM_WB.sv
+read -sv ../../phase1_riscv_core/rtl/writeback_stage.sv
+read -sv ../../phase1_riscv_core/rtl/hazard_unit.sv
+read -sv ../../phase1_riscv_core/rtl/forwarding_unit.sv
+read -sv ../../phase1_riscv_core/rtl/riscv_core.sv
+read -sv core_props.sv
+
+# Bind property module
+# (core_props already parameterised; in sby bind is handled via elaboration)
+hierarchy -top riscv_core
+proc
+flatten
+opt
+
+[files]
+core_props.sv
+../../phase1_riscv_core/rtl/alu.sv
+../../phase1_riscv_core/rtl/reg_file.sv
+../../phase1_riscv_core/rtl/imm_gen.sv
+../../phase1_riscv_core/rtl/fetch_stage.sv
+../../phase1_riscv_core/rtl/pipeline_reg_IF_ID.sv
+../../phase1_riscv_core/rtl/decode_stage.sv
+../../phase1_riscv_core/rtl/pipeline_reg_ID_EX.sv
+../../phase1_riscv_core/rtl/execute_stage.sv
+../../phase1_riscv_core/rtl/pipeline_reg_EX_MEM.sv
+../../phase1_riscv_core/rtl/memory_stage.sv
+../../phase1_riscv_core/rtl/pipeline_reg_MEM_WB.sv
+../../phase1_riscv_core/rtl/writeback_stage.sv
+../../phase1_riscv_core/rtl/hazard_unit.sv
+../../phase1_riscv_core/rtl/forwarding_unit.sv
+../../phase1_riscv_core/rtl/riscv_core.sv
