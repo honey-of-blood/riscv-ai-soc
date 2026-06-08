@@ -1,9 +1,13 @@
 `timescale 1ns/1ps
-// AXI4-Lite slave wrapping a 64KB SRAM (word-addressed internally)
+// AXI4 slave wrapping a 64KB SRAM.
+// Supports both AXI4-Lite (ARLEN=0) and AXI4 INCR bursts (ARLEN=1..255).
 // Address range: 0x0000_0000 – 0x0000_FFFF
-// - Byte-enable writes, word-aligned reads
-// - Single-cycle latency: AWREADY/WREADY=1 combinationally, BVALID next cycle
-//   ARREADY=1 combinationally, RVALID next cycle
+//
+// Read bursts: accepts ARLEN, increments address by 4 bytes per beat,
+//   asserts RLAST on the final beat.
+// Write bursts: accepts AWLEN, WLAST; commits each W beat individually.
+// AXI4-Lite compatibility: tie ARLEN=0, AWLEN=0, ARBURST=0, AWBURST=0 for
+//   single-beat behaviour — identical to original AXI4-Lite interface.
 
 module axi_sram #(
     parameter DEPTH = 16384  // 16384 words × 4 bytes = 64 KB
@@ -11,103 +15,144 @@ module axi_sram #(
     input  logic        clk,
     input  logic        rst_n,
 
-    // AXI4-Lite slave port
+    // ── AXI4 write address channel ────────────────────────────────────────
     input  logic [31:0] s_awaddr,
+    input  logic  [7:0] s_awlen,     // 0 = 1 beat (AXI4-Lite compat)
+    input  logic  [1:0] s_awburst,   // 01 = INCR
     input  logic        s_awvalid,
     output logic        s_awready,
 
+    // ── AXI4 write data channel ───────────────────────────────────────────
     input  logic [31:0] s_wdata,
     input  logic  [3:0] s_wstrb,
+    input  logic        s_wlast,
     input  logic        s_wvalid,
     output logic        s_wready,
 
+    // ── AXI4 write response channel ───────────────────────────────────────
     output logic  [1:0] s_bresp,
     output logic        s_bvalid,
     input  logic        s_bready,
 
+    // ── AXI4 read address channel ─────────────────────────────────────────
     input  logic [31:0] s_araddr,
+    input  logic  [7:0] s_arlen,     // 0 = 1 beat
+    input  logic  [1:0] s_arburst,   // 01 = INCR
     input  logic        s_arvalid,
     output logic        s_arready,
 
+    // ── AXI4 read data channel ────────────────────────────────────────────
     output logic [31:0] s_rdata,
     output logic  [1:0] s_rresp,
     output logic        s_rvalid,
+    output logic        s_rlast,
     input  logic        s_rready
 );
 
-localparam AW = $clog2(DEPTH);  // word-address width = 14
+localparam AW = $clog2(DEPTH);
 
-// SRAM array
 logic [31:0] mem [0:DEPTH-1];
 
-// ─── Write path ───────────────────────────────────────────────────────────────
-// Accept AW and W simultaneously (common AXI4-Lite practice)
-// Both channels must be valid before performing the write.
+// ── Write path ────────────────────────────────────────────────────────────
+// Accept AW immediately; buffer address + burst params.
+// Accept W beats one by one, incrementing address per beat (INCR burst).
 
-// Word address extracted outside always_comb (Icarus bit-select rule)
-logic [AW-1:0] aw_waddr;
-assign aw_waddr = s_awaddr[AW+1:2];  // byte→word: drop 2 LSBs
+logic        wr_active;
+logic [31:0] wr_cur_addr;
+logic  [7:0] wr_remaining;
+logic [AW-1:0] wr_waddr;
+assign wr_waddr = wr_cur_addr[AW+1:2];
 
-// Accept both channels when both valid
-assign s_awready = 1'b1;
-assign s_wready  = 1'b1;
-
-logic wr_pending;
-logic [AW-1:0] wr_addr_r;
-logic [31:0]   wr_data_r;
-logic  [3:0]   wr_strb_r;
+assign s_awready = !wr_active;
+assign s_wready  =  wr_active;
 
 always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-        wr_pending <= 1'b0;
-        s_bvalid   <= 1'b0;
+        wr_active    <= 1'b0;
+        wr_cur_addr  <= 32'b0;
+        wr_remaining <= 8'b0;
+        s_bvalid     <= 1'b0;
     end else begin
-        // Latch write when AW+W both handshake
-        if (s_awvalid && s_wvalid) begin
-            wr_addr_r  <= aw_waddr;
-            wr_data_r  <= s_wdata;
-            wr_strb_r  <= s_wstrb;
-            wr_pending <= 1'b1;
-        end
+        if (s_bvalid && s_bready) s_bvalid <= 1'b0;
 
-        // Perform write to SRAM
-        if (wr_pending) begin
-            if (wr_strb_r[0]) mem[wr_addr_r][ 7: 0] <= wr_data_r[ 7: 0];
-            if (wr_strb_r[1]) mem[wr_addr_r][15: 8] <= wr_data_r[15: 8];
-            if (wr_strb_r[2]) mem[wr_addr_r][23:16] <= wr_data_r[23:16];
-            if (wr_strb_r[3]) mem[wr_addr_r][31:24] <= wr_data_r[31:24];
-            wr_pending <= 1'b0;
-            s_bvalid   <= 1'b1;
-        end
+        if (!wr_active) begin
+            if (s_awvalid) begin
+                wr_cur_addr  <= s_awaddr;
+                wr_remaining <= s_awlen;
+                wr_active    <= 1'b1;
+            end
+        end else begin
+            if (s_wvalid) begin
+                // Byte-enable write
+                if (s_wstrb[0]) mem[wr_waddr][ 7: 0] <= s_wdata[ 7: 0];
+                if (s_wstrb[1]) mem[wr_waddr][15: 8] <= s_wdata[15: 8];
+                if (s_wstrb[2]) mem[wr_waddr][23:16] <= s_wdata[23:16];
+                if (s_wstrb[3]) mem[wr_waddr][31:24] <= s_wdata[31:24];
 
-        // Clear BVALID once master accepts
-        if (s_bvalid && s_bready)
-            s_bvalid <= 1'b0;
-    end
-end
-
-assign s_bresp = 2'b00;  // OKAY
-
-// ─── Read path ────────────────────────────────────────────────────────────────
-logic [AW-1:0] ar_waddr;
-assign ar_waddr = s_araddr[AW+1:2];
-
-assign s_arready = 1'b1;
-
-always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        s_rvalid <= 1'b0;
-        s_rdata  <= 32'd0;
-    end else begin
-        if (s_arvalid) begin
-            s_rdata  <= mem[ar_waddr];
-            s_rvalid <= 1'b1;
-        end else if (s_rvalid && s_rready) begin
-            s_rvalid <= 1'b0;
+                if (wr_remaining == 8'b0 || s_wlast) begin
+                    wr_active <= 1'b0;
+                    s_bvalid  <= 1'b1;
+                end else begin
+                    wr_cur_addr  <= wr_cur_addr + 4;
+                    wr_remaining <= wr_remaining - 1'b1;
+                end
+            end
         end
     end
 end
 
-assign s_rresp = 2'b00;  // OKAY
+assign s_bresp = 2'b00;
+
+// ── Read path ─────────────────────────────────────────────────────────────
+// Burst read FSM: one beat per cycle after address handshake.
+// 1-cycle SRAM latency: data arrives the cycle after the address is captured.
+
+logic        rd_active;
+logic [31:0] rd_cur_addr;
+logic  [7:0] rd_remaining;
+logic [AW-1:0] rd_raddr;
+assign rd_raddr    = rd_cur_addr[AW+1:2];
+
+assign s_arready = !rd_active;
+
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        rd_active    <= 1'b0;
+        rd_cur_addr  <= 32'b0;
+        rd_remaining <= 8'b0;
+        s_rvalid     <= 1'b0;
+        s_rdata      <= 32'b0;
+        s_rlast      <= 1'b0;
+    end else begin
+        if (!rd_active) begin
+            if (s_arvalid) begin
+                rd_cur_addr  <= s_araddr;
+                rd_remaining <= s_arlen;
+                rd_active    <= 1'b1;
+                // Serve first word immediately next cycle
+                s_rdata  <= mem[s_araddr[AW+1:2]];
+                s_rvalid <= 1'b1;
+                s_rlast  <= (s_arlen == 8'b0);
+            end
+        end else begin
+            if (s_rvalid && s_rready) begin
+                if (rd_remaining == 8'b0) begin
+                    // Last beat consumed
+                    rd_active <= 1'b0;
+                    s_rvalid  <= 1'b0;
+                    s_rlast   <= 1'b0;
+                end else begin
+                    rd_cur_addr  <= rd_cur_addr + 4;
+                    rd_remaining <= rd_remaining - 1'b1;
+                    s_rdata  <= mem[(rd_cur_addr[AW+1:2]) + 1];
+                    s_rvalid <= 1'b1;
+                    s_rlast  <= (rd_remaining == 8'd1);
+                end
+            end
+        end
+    end
+end
+
+assign s_rresp = 2'b00;
 
 endmodule

@@ -86,14 +86,36 @@ logic        sample_bit;
 assign sample_bit = lfsr[0];
 
 `else
-// Synthesis: ring oscillator (three inverters, no register — combinational loop)
-(* KEEP = "TRUE", DONT_TOUCH = "TRUE" *) logic [2:0] ring;
-assign ring[0] = !ring[2];
-assign ring[1] = !ring[0];
-assign ring[2] = !ring[1];
+// Synthesis: three independent 5-inverter ring oscillators.
+// Odd number of inverters (5) prevents even-loop removal by P&R.
+// KEEP/DONT_TOUCH forces independent placement so oscillation frequencies
+// differ due to routing skew — their XOR provides the entropy.
+// XDC false-paths must be added for all ring_a/b/c nets (see constraints.xdc).
+(* KEEP="TRUE", DONT_TOUCH="TRUE" *) logic [4:0] ring_a;
+(* KEEP="TRUE", DONT_TOUCH="TRUE" *) logic [4:0] ring_b;
+(* KEEP="TRUE", DONT_TOUCH="TRUE" *) logic [4:0] ring_c;
 
+assign ring_a[0] = ~ring_a[4];
+assign ring_a[1] = ~ring_a[0];
+assign ring_a[2] = ~ring_a[1];
+assign ring_a[3] = ~ring_a[2];
+assign ring_a[4] = ~ring_a[3];
+
+assign ring_b[0] = ~ring_b[4];
+assign ring_b[1] = ~ring_b[0];
+assign ring_b[2] = ~ring_b[1];
+assign ring_b[3] = ~ring_b[2];
+assign ring_b[4] = ~ring_b[3];
+
+assign ring_c[0] = ~ring_c[4];
+assign ring_c[1] = ~ring_c[0];
+assign ring_c[2] = ~ring_c[1];
+assign ring_c[3] = ~ring_c[2];
+assign ring_c[4] = ~ring_c[3];
+
+// Von Neumann de-bias: XOR three LSBs
 logic sample_bit;
-assign sample_bit = ring[0];
+assign sample_bit = ring_a[0] ^ ring_b[0] ^ ring_c[0];
 `endif
 
 // ── 32-bit shift register accumulator ─────────────────────────────────────
