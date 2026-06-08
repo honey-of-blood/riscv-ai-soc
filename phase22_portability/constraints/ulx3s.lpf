@@ -1,0 +1,51 @@
+# ulx3s.lpf — Pin constraints for ECP5 ULX3S (LFE5U-85F-6BG381C)
+# Target: 50 MHz Lattice ECP5 board by Radiona
+# Documentation: https://radiona.org/ulx3s/
+
+FREQUENCY PORT "clk_25mhz" 25.0 MHz;
+
+# ── Clock ─────────────────────────────────────────────────────────────────────
+LOCATE COMP "clk_25mhz"   SITE "G2";
+IOBUF PORT "clk_25mhz"    IO_TYPE=LVCMOS33;
+
+# ── Push buttons (active low) ─────────────────────────────────────────────────
+LOCATE COMP "btn_pwr_n"   SITE "D6";    # PWR button → user reset
+LOCATE COMP "btn_f1"      SITE "R1";
+LOCATE COMP "btn_f2"      SITE "T1";
+IOBUF PORT "btn_pwr_n"    IO_TYPE=LVCMOS33  PULLMODE=UP;
+IOBUF PORT "btn_f1"       IO_TYPE=LVCMOS33  PULLMODE=UP;
+IOBUF PORT "btn_f2"       IO_TYPE=LVCMOS33  PULLMODE=UP;
+
+# ── LEDs ──────────────────────────────────────────────────────────────────────
+LOCATE COMP "led[0]"  SITE "B2";
+LOCATE COMP "led[1]"  SITE "C2";
+LOCATE COMP "led[2]"  SITE "C1";
+LOCATE COMP "led[3]"  SITE "D2";
+LOCATE COMP "led[4]"  SITE "D1";
+LOCATE COMP "led[5]"  SITE "E2";
+LOCATE COMP "led[6]"  SITE "E1";
+LOCATE COMP "led[7]"  SITE "H3";
+IOBUF PORT "led[0]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[1]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[2]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[3]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[4]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[5]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[6]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "led[7]"  IO_TYPE=LVCMOS33 DRIVE=4;
+
+# ── UART (via ESP32 UART bridge on ULX3S) ────────────────────────────────────
+LOCATE COMP "ftdi_txd"   SITE "L4";    # SoC RX input
+LOCATE COMP "ftdi_rxd"   SITE "M1";    # SoC TX output
+IOBUF PORT "ftdi_txd"    IO_TYPE=LVCMOS33;
+IOBUF PORT "ftdi_rxd"    IO_TYPE=LVCMOS33;
+
+# ── SPI flash header (GP/GN) ──────────────────────────────────────────────────
+LOCATE COMP "gp[0]"      SITE "B11";   # SPI SCK
+LOCATE COMP "gp[1]"      SITE "C11";   # SPI MOSI
+LOCATE COMP "gn[0]"      SITE "A11";   # SPI MISO
+LOCATE COMP "gn[1]"      SITE "A10";   # SPI CS_N
+IOBUF PORT "gp[0]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gp[1]"  IO_TYPE=LVCMOS33 DRIVE=4;
+IOBUF PORT "gn[0]"  IO_TYPE=LVCMOS33;
+IOBUF PORT "gn[1]"  IO_TYPE=LVCMOS33 DRIVE=4;

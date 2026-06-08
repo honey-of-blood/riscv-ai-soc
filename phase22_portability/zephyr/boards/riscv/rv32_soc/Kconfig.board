@@ -1,0 +1,26 @@
+# Kconfig.board — Zephyr board-level Kconfig for RV32 AI SoC
+
+config BOARD_RV32_SOC
+    bool "RV32 AI SoC (Artix-7 / DE1-SoC / ULX3S)"
+    depends on SOC_SERIES_RISCV32
+    select SOC_RV32_SOC
+    help
+      Board definition for the RV32 AI SoC portfolio project.
+      Supports three board variants via separate DTS overlays:
+        rv32_soc_arty_a7  — Digilent Arty A7-100T (Xilinx Artix-7)
+        rv32_soc_de1_soc  — Terasic DE1-SoC (Intel Cyclone V)
+        rv32_soc_ulx3s    — Radiona ULX3S (Lattice ECP5)
+      All variants share the same peripheral memory map and use the
+      same firmware binaries.
+
+config BOARD_RV32_SOC_ARTY_A7
+    bool "Arty A7-100T variant"
+    depends on BOARD_RV32_SOC
+
+config BOARD_RV32_SOC_DE1_SOC
+    bool "DE1-SoC Cyclone V variant"
+    depends on BOARD_RV32_SOC
+
+config BOARD_RV32_SOC_ULX3S
+    bool "ULX3S ECP5 variant"
+    depends on BOARD_RV32_SOC

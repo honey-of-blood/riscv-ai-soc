@@ -1,0 +1,159 @@
+/* rv32_soc.dts — Zephyr Device Tree for RV32 AI SoC on Artix-7 / DE1-SoC
+ *
+ * Memory map (matches phase8 SoC):
+ *   0x0000_0000..0x0000_FFFF  BRAM instruction + data (64 KB)
+ *   0x1000_1000..0x1000_1FFF  UART (NS16550 compatible)
+ *   0x1000_2000..0x1000_2FFF  GPIO (16-bit)
+ *   0x1000_3000..0x1000_3FFF  RISC-V Timer / CLINT
+ *   0x1000_4000..0x1000_4FFF  SPI master
+ *   0x1000_5000..0x1000_5FFF  CLINT (msip + mtime)
+ *   0x1000_6000..0x1000_6FFF  PLIC (8-source)
+ *   0x1000_7000..0x1000_7FFF  I2C master
+ *   0x5000_0000..0x5000_FFFF  AI Accelerator v3
+ */
+/dts-v1/;
+#include <mem.h>
+
+/ {
+    model = "RV32 AI SoC";
+    compatible = "rv32-ai-soc", "riscv-soc";
+    #address-cells = <1>;
+    #size-cells = <1>;
+
+    chosen {
+        zephyr,sram    = &sram0;
+        zephyr,flash   = &flash0;
+        zephyr,console = &uart0;
+        zephyr,shell-uart = &uart0;
+    };
+
+    /* ── CPUs ────────────────────────────────────────────────────────── */
+    cpus {
+        #address-cells = <1>;
+        #size-cells    = <0>;
+
+        cpu0: cpu@0 {
+            compatible       = "riscv";
+            device_type      = "cpu";
+            reg              = <0>;
+            riscv,isa        = "rv32imac_zicsr";
+            clock-frequency  = <100000000>;
+            mmu-type         = "riscv,none";
+            status           = "okay";
+
+            intc: interrupt-controller {
+                #interrupt-cells = <1>;
+                compatible       = "riscv,cpu-intc";
+                interrupt-controller;
+            };
+        };
+    };
+
+    /* ── Memories ────────────────────────────────────────────────────── */
+    flash0: flash@0 {
+        compatible = "soc-nv-flash";
+        reg        = <0x00000000 DT_SIZE_K(32)>;
+    };
+
+    sram0: memory@20000000 {
+        compatible = "mmio-sram";
+        reg        = <0x20000000 DT_SIZE_K(256)>;
+    };
+
+    /* ── SoC peripherals ────────────────────────────────────────────── */
+    soc {
+        compatible     = "simple-bus";
+        #address-cells = <1>;
+        #size-cells    = <1>;
+        ranges;
+
+        /* UART0 — NS16550-compatible, wired to USB serial */
+        uart0: serial@10001000 {
+            compatible     = "ns16550";
+            reg            = <0x10001000 0x1000>;
+            clock-frequency = <25000000>;
+            current-speed  = <115200>;
+            reg-shift      = <2>;
+            interrupt-parent = <&plic0>;
+            interrupts     = <1 1>;
+            status         = "okay";
+        };
+
+        /* GPIO — 16-bit bidirectional */
+        gpio0: gpio@10002000 {
+            compatible     = "rv32-soc-gpio";
+            reg            = <0x10002000 0x1000>;
+            gpio-controller;
+            #gpio-cells    = <2>;
+            ngpios         = <16>;
+            interrupt-parent = <&plic0>;
+            interrupts     = <2 1>;
+            status         = "okay";
+        };
+
+        /* RISC-V Timer (mtime/mtimecmp at CLINT) */
+        timer0: timer@10003000 {
+            compatible  = "rv32-soc-timer";
+            reg         = <0x10003000 0x1000>;
+            clock-frequency = <100000000>;
+            interrupts  = <5 1>;
+            interrupt-parent = <&intc>;
+            status      = "okay";
+        };
+
+        /* SPI master */
+        spi0: spi@10004000 {
+            compatible  = "rv32-soc-spi";
+            reg         = <0x10004000 0x1000>;
+            #address-cells = <1>;
+            #size-cells    = <0>;
+            clock-frequency = <12500000>;
+            interrupt-parent = <&plic0>;
+            interrupts  = <3 1>;
+            status      = "okay";
+        };
+
+        /* CLINT — machine-mode timer + software interrupt */
+        clint0: clint@10005000 {
+            compatible  = "sifive,clint0";
+            reg         = <0x10005000 0x1000>;
+            interrupt-parent = <&intc>;
+            interrupts  = <3 1>, <7 1>;
+            interrupt-names = "soft", "timer";
+            status      = "okay";
+        };
+
+        /* PLIC — platform-level interrupt controller */
+        plic0: interrupt-controller@10006000 {
+            compatible     = "sifive,plic-1.0.0";
+            reg            = <0x10006000 0x1000>;
+            #interrupt-cells = <2>;
+            interrupt-controller;
+            riscv,ndev     = <8>;
+            interrupt-parent = <&intc>;
+            interrupts     = <11 1>;
+            status         = "okay";
+        };
+
+        /* I2C master */
+        i2c0: i2c@10007000 {
+            compatible     = "rv32-soc-i2c";
+            reg            = <0x10007000 0x1000>;
+            #address-cells = <1>;
+            #size-cells    = <0>;
+            clock-frequency = <I2C_BITRATE_STANDARD>;
+            interrupt-parent = <&plic0>;
+            interrupts     = <4 1>;
+            status         = "okay";
+        };
+
+        /* AI Accelerator v3 */
+        accel0: accel@50000000 {
+            compatible  = "rv32-soc-accel";
+            reg         = <0x50000000 0x10000>;
+            interrupt-parent = <&plic0>;
+            interrupts  = <6 1>;
+            status      = "okay";
+        };
+    };
+};

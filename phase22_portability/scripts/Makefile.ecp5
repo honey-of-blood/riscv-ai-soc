@@ -1,0 +1,80 @@
+# Makefile.ecp5 — Open-source ECP5 synthesis + P&R flow (ULX3S board)
+#
+# Prerequisites:
+#   sudo apt install yosys nextpnr-ecp5 prjtrellis-utils
+#
+# Usage:
+#   make -f scripts/Makefile.ecp5 all   # full build
+#   make -f scripts/Makefile.ecp5 synth # synthesis only (fast CI check)
+
+YOSYS    := yosys
+NEXTPNR  := nextpnr-ecp5
+ECPPACK  := ecppack
+
+ROOT     := $(dir $(lastword $(MAKEFILE_LIST)))/..
+BUILD    := $(ROOT)/build/ecp5
+BOARD    := ulx3s
+
+# ULX3S board: LFE5U-85F-6BG381C
+DEVICE   := --device LFE5U-85F-6BG381C
+LPF      := $(ROOT)/phase22_portability/constraints/ulx3s.lpf
+
+# Gather all RTL source files (no vendor-specific primitives without define)
+RTL_DIRS := \
+    $(ROOT)/phase1_riscv_core/rtl \
+    $(ROOT)/phase2_cache/rtl \
+    $(ROOT)/phase3_axi/rtl \
+    $(ROOT)/phase5_soc/rtl \
+    $(ROOT)/phase15_perf/rtl \
+    $(ROOT)/phase16_firmware/rtl \
+    $(ROOT)/phase22_portability/rtl
+
+# Collect all .sv files from the RTL directories
+SRCS := $(foreach d,$(RTL_DIRS),$(wildcard $(d)/*.sv))
+
+# ECP5 top-level wraps soc_top and uses no vendor primitives
+TOP      := fpga_top_de1_soc   # reuse DE1-SoC top (same port mapping)
+JSON     := $(BUILD)/rv32_soc_ecp5.json
+CFG      := $(BUILD)/rv32_soc_out.config
+BIT      := $(BUILD)/rv32_soc.bit
+
+.PHONY: all synth pnr pack clean
+
+all: synth pnr pack
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+# ── Synthesis (Yosys) ─────────────────────────────────────────────────────────
+# Note: no INTEL_FPGA or XILINX_DSP defined → vendor cells compile to RTL fallbacks.
+synth: $(JSON)
+
+$(JSON): $(SRCS) | $(BUILD)
+	$(YOSYS) -Q -p " \
+	    read_verilog -sv $(SRCS); \
+	    synth_ecp5 -top $(TOP) -json $(JSON) \
+	" 2>&1 | tee $(BUILD)/yosys.log
+	@grep -q "^End of script." $(BUILD)/yosys.log || \
+	    (echo "ERROR: Yosys synthesis failed; see $(BUILD)/yosys.log" && exit 1)
+
+# ── Place and route (nextpnr-ecp5) ───────────────────────────────────────────
+pnr: $(CFG)
+
+$(CFG): $(JSON)
+	$(NEXTPNR) $(DEVICE) \
+	    --json $(JSON) \
+	    --lpf  $(LPF)  \
+	    --textcfg $(CFG) \
+	    --freq 50 \
+	    --timing-allow-fail \
+	    --seed 1 \
+	    2>&1 | tee $(BUILD)/nextpnr.log
+
+# ── Bitstream packing ────────────────────────────────────────────────────────
+pack: $(BIT)
+
+$(BIT): $(CFG)
+	$(ECPPACK) $(CFG) $(BIT)
+
+clean:
+	rm -rf $(BUILD)

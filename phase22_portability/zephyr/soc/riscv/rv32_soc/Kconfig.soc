@@ -1,0 +1,33 @@
+# Kconfig.soc — SoC-level Kconfig for RV32 AI SoC Zephyr port
+
+config SOC_RV32_SOC
+    bool "RV32 AI SoC"
+    select RISCV
+    select ATOMIC_OPERATIONS_C
+    select RISCV_ISA_RV32I
+    select RISCV_ISA_EXT_M
+    select RISCV_ISA_EXT_A
+    select RISCV_ISA_EXT_C
+    select RISCV_HAS_PLIC
+    select RISCV_HAS_MACHINE_TIMER
+    help
+      SoC definition for the RV32IMAC AI SoC designed as a portfolio
+      project.  Implements:
+        - 5-stage in-order pipeline with full forwarding
+        - M-extension (HW multiply/divide)
+        - A-extension (LR/SC atomic primitives)
+        - C-extension (compressed 16-bit instructions)
+        - Hardware debug (DM 0.13, JTAG TAP)
+        - RISC-V PMP (8 regions)
+        - NS16550 UART, GPIO, SPI, I2C, Timer, CLINT, PLIC peripherals
+        - AI accelerator v3 (INT4 systolic array + DMA)
+
+if SOC_RV32_SOC
+
+config NUM_IRQS
+    default 8
+
+config RISCV_MACHINE_TIMER_SYSTEM_CLOCK_DIVIDER
+    default 0
+
+endif # SOC_RV32_SOC
