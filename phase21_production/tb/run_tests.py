@@ -13,6 +13,9 @@ Run one suite:
     python run_tests.py iss_compare
     python run_tests.py coverage
     python run_tests.py formal_checks
+    python run_tests.py iss_stress
+    python run_tests.py coverage_stress
+    python run_tests.py formal_stress
 """
 import sys, os, subprocess
 from pathlib import Path
@@ -54,9 +57,12 @@ EXTRA_SOURCES = [
 ]
 
 SUITES = [
-    ("iss_compare",   "test_iss_compare"),
-    ("coverage",      "test_coverage"),
-    ("formal_checks", "test_formal_checks"),
+    ("iss_compare",      "test_iss_compare"),
+    ("coverage",         "test_coverage"),
+    ("formal_checks",    "test_formal_checks"),
+    ("iss_stress",       "test_iss_stress"),
+    ("coverage_stress",  "test_coverage_stress"),
+    ("formal_stress",    "test_formal_stress"),
 ]
 
 

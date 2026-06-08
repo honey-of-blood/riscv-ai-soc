@@ -86,11 +86,22 @@ def lb  (rd, rs1, imm): return _i(imm, rs1, 0, rd, OP_LOAD)
 def lhu (rd, rs1, imm): return _i(imm, rs1, 5, rd, OP_LOAD)
 def lbu (rd, rs1, imm): return _i(imm, rs1, 4, rd, OP_LOAD)
 def sw  (rs2, rs1, imm): return _s(imm, rs2, rs1, 2)
+def sh  (rs2, rs1, imm): return _s(imm, rs2, rs1, 1)
+def sb  (rs2, rs1, imm): return _s(imm, rs2, rs1, 0)
+
+OP_AUIPC = 0x17
 
 def lui(rd, imm_val):
     return (((imm_val >> 12) & 0xFFFFF) << 12) | (rd << 7) | OP_LUI
 
+def auipc(rd, imm_val):
+    """rd = PC + {imm_val[31:12], 12'b0}.  imm_val is the full 32-bit value."""
+    return (((imm_val >> 12) & 0xFFFFF) << 12) | (rd << 7) | OP_AUIPC
+
 def jal(rd, imm): return _j(imm, rd)
+
+def jalr(rd, rs1, imm):
+    return _i(imm, rs1, 0, rd, 0x67)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -103,12 +114,15 @@ EPILOGUE_LEN = 2         # sw + jal
 
 # ── Generator ─────────────────────────────────────────────────────────────────
 
-def gen_program(n_body=20, seed=0, m_ext_frac=0.15, branch_frac=0.10):
+def gen_program(n_body=20, seed=0, m_ext_frac=0.15, branch_frac=0.10, div_frac=0.0):
     """Return (instrs, iss_steps, init_regs) for an RV32IM random program.
 
     instrs    : flat list of 32-bit instruction words
     iss_steps : number of ISS steps to run for register comparison
     init_regs : dict {reg -> s32 value} set by prologue (for verification docs)
+
+    div_frac  : fraction of body instructions that are DIV/DIVU/REM/REMU
+                (includes div-by-zero cases; both ISS and DUT handle via spec)
     """
     rng = random.Random(seed)
 
@@ -132,15 +146,20 @@ def gen_program(n_body=20, seed=0, m_ext_frac=0.15, branch_frac=0.10):
         rs1 = rng.choice(WORK_REGS)
         rs2 = rng.choice(WORK_REGS)
         imm = rng.randint(-128, 127)
-        sh  = rng.randint(1, 31)
+        sh  = rng.randint(0, 31)   # include 0 and 31 for boundary coverage
         r   = rng.random()
 
-        if r < m_ext_frac:
-            # M-extension (avoid div/rem by registers that might be 0)
+        if r < div_frac:
+            # DIV/REM family (div-by-zero produces spec-defined result; ISS+DUT agree)
+            op = rng.choice([div_, divu, rem_, remu])
+            instrs.append(op(rd, rs1, rs2))
+            i += 1
+        elif r < div_frac + m_ext_frac:
+            # MUL family
             op = rng.choice([mul, mulh, mulhu, mulhsu])
             instrs.append(op(rd, rs1, rs2))
             i += 1
-        elif r < m_ext_frac + branch_frac:
+        elif r < div_frac + m_ext_frac + branch_frac:
             # Forward branch: skip 1 or 2 instructions
             skip = rng.randint(1, min(2, n_body - i - 1)) if (n_body - i) > 2 else 1
             f3   = rng.choice([0, 1, 4, 5, 6, 7])   # BEQ BNE BLT BGE BLTU BGEU
@@ -170,6 +189,8 @@ def gen_program(n_body=20, seed=0, m_ext_frac=0.15, branch_frac=0.10):
                 lambda: slli(rd, rs1, sh),
                 lambda: srli(rd, rs1, sh),
                 lambda: srai(rd, rs1, sh),
+                lambda: slti (rd, rs1, imm),
+                lambda: sltiu(rd, rs1, imm),
             ])
             instrs.append(op())
             i += 1

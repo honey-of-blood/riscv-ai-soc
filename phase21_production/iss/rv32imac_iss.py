@@ -167,7 +167,7 @@ class RV32IMISS:
                 elif f3 == 1: # MULH (signed × signed, upper 32)
                     v = ((ai * bi) >> 32) & 0xFFFFFFFF
                 elif f3 == 2: # MULHSU (signed × unsigned, upper 32)
-                    v = ((ai * a) >> 32) & 0xFFFFFFFF
+                    v = ((ai * b) >> 32) & 0xFFFFFFFF
                 elif f3 == 3: # MULHU (unsigned × unsigned, upper 32)
                     v = ((a * b) >> 32) & 0xFFFFFFFF
                 elif f3 == 4: # DIV (signed, truncate-toward-zero)
