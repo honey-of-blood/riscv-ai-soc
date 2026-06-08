@@ -2765,6 +2765,1825 @@ It must cover:
 
 ---
 
+## PHASE 23 — RTL Reliability Hardening
+### ⏱ Weeks 1–4
+
+Phases 1–22 produced a functionally correct SoC.
+This phase corrects six structural weaknesses identified after the full design review:
+the I-cache exists but is not wired into the SoC; the cache refill path uses AXI4-Lite
+individual transactions instead of AXI4 bursts; the L1 D-cache is direct-mapped (vulnerable
+to conflict-miss thrashing); the TRNG has no synthesis-path ring oscillator; and the CPU/
+peripheral clock boundary has no formal CDC synchronizers.
+Fixing all six moves the SoC from "simulation correct" to "hardware reliable."
+
+---
+
+### 23.1 Wire the I-Cache and Branch Predictor into soc_top
+
+The I-cache (`phase15_perf/rtl/icache.sv`) and branch predictor
+(`phase15_perf/rtl/branch_predictor.sv`) were built in Phase 15 but `soc_top.sv` stubs
+them out:
+
+```systemverilog
+// soc_top.sv — Phase 22 state (WRONG — stubs both)
+.icache_stall_i(1'b0),    // I-cache not wired
+```
+
+The fix requires four changes in `phase5_soc/rtl/soc_top.sv`:
+
+**Step 1 — Instantiate icache inside soc_top:**
+
+```systemverilog
+// Instruction fetch AXI4-Lite signals (icache ↔ SRAM slave via crossbar m2)
+logic        ic_arvalid, ic_arready, ic_rvalid, ic_rready;
+logic [31:0] ic_araddr,  ic_rdata;
+logic [1:0]  ic_rresp;
+
+icache u_icache (
+    .clk           (clk),
+    .rst_n         (rst_n),
+    // CPU instruction fetch interface
+    .fetch_addr_i  (imem_addr),       // from riscv_core
+    .fetch_req_i   (1'b1),
+    .instr_o       (imem_rdata),      // to riscv_core
+    .stall_o       (icache_stall),    // to hazard unit
+    .flush_i       (icache_flush),    // from riscv_core FENCE.I
+    // AXI4-Lite master (refill from SRAM via crossbar M2)
+    .m_arvalid_o   (ic_arvalid),
+    .m_arready_i   (ic_arready),
+    .m_araddr_o    (ic_araddr),
+    .m_rvalid_i    (ic_rvalid),
+    .m_rready_o    (ic_rready),
+    .m_rdata_i     (ic_rdata),
+    .m_rresp_i     (ic_rresp),
+    .m_rlast_i     (ic_rlast)
+);
+```
+
+**Step 2 — Instantiate branch_predictor inside soc_top and connect its ports to
+riscv_core's `predict_taken_i`, `predict_target_i`, `branch_resolved_i`,
+`branch_taken_i`, `branch_pc_i`, `branch_target_i` ports.**
+
+**Step 3 — Expand the AXI4 crossbar from 3 masters to 4 masters** (M0=D-cache,
+M1=MMIO bypass, M2=I-cache refill, M3=DMA).
+Update `phase20_hardening/rtl/axi4_crossbar_param.sv` instantiation in soc_top
+from NM=3 to NM=4 and wire the new M2 port to `ic_ar*`/`ic_r*`.
+
+**Step 4 — Connect `icache_stall` to `hazard_unit`:**
+
+```systemverilog
+// soc_top.sv — after fix
+hazard_unit u_hazard (
+    ...
+    .icache_stall_i (icache_stall),   // was 1'b0
+    ...
+);
+```
+
+**Verification:** Run a firmware loop tight enough that the I-cache hits dominate — if
+`icache_stall` pulses only on the first fetch of each new cache line and not on
+subsequent fetches of the same line, the cache is live.
+
+---
+
+### 23.2 Replace AXI4-Lite Burst-to-Lite with True AXI4 Burst Refill Port
+
+`axi4_burst_to_lite.sv` converts a 4-beat INCR burst from the D-cache into four
+individual AXI4-Lite single-beat transactions.
+Each individual transaction requires a full address + data round-trip: at 100 MHz with
+2-cycle BRAM latency, a 4-word cache-line refill takes `4 × (2+2) = 16 cycles` instead
+of `1 address + 4 data = 5 cycles` for a true AXI4 burst.
+
+The fix is to add a dedicated AXI4-full port on the SRAM slave (`axi_sram.sv`) that
+accepts AWLEN/ARLEN burst beats natively, and connect the D-cache directly to it,
+bypassing burst_to_lite entirely.
+
+**Changes to `phase2_cache/rtl/cache_top.sv` AXI master outputs** — already emits
+ARLEN=3, ARBURST=INCR. No change needed there.
+
+**New AXI4-full SRAM slave port in `axi_sram.sv`:**
+
+```systemverilog
+// Add burst support to axi_sram.sv
+// Track remaining beats with a counter
+logic [7:0] rd_beat_cnt, wr_beat_cnt;
+logic [31:0] burst_rd_addr, burst_wr_addr;
+
+always_ff @(posedge clk) begin
+    if (s_arvalid && s_arready) begin
+        burst_rd_addr <= s_araddr;
+        rd_beat_cnt   <= s_arlen;       // ARLEN=3 → 4 beats
+    end else if (s_rvalid && s_rready && rd_beat_cnt > 0) begin
+        burst_rd_addr <= burst_rd_addr + 4;  // INCR mode: +4 bytes per beat
+        rd_beat_cnt   <= rd_beat_cnt - 1;
+    end
+end
+
+assign s_rlast  = (rd_beat_cnt == 0);
+assign s_rdata  = mem[burst_rd_addr[ADDR_W-1:2]];   // word-addressed
+assign s_rvalid = rd_active;
+assign s_arready = !rd_active;
+```
+
+**Remove `axi4_burst_to_lite.sv` from `soc_top.sv`** — connect `cache_top`'s AXI
+master directly to the SRAM slave's new burst port on crossbar S0.
+
+**Icarus Verilog note:** ARLEN/ARSIZE/ARBURST ports must be declared as separate
+`logic` signals — no `typedef struct` on port lists (not supported in Icarus 12).
+
+**Expected benefit:** D-cache miss penalty drops from ~16 cycles to ~6 cycles.
+The Phase 2 performance test (`hit_latency`) should still pass; a new test
+`burst_refill_cycles` must confirm the 4-beat read completes in ≤6 cycles.
+
+---
+
+### 23.3 Upgrade L1 D-Cache to 2-Way Set-Associative with SECDED ECC
+
+The direct-mapped D-cache suffers conflict misses when two hot data addresses map to
+the same cache set (any two addresses separated by a multiple of 0x400 = 4 KB,
+the cache capacity, will alias).
+A 2-way set-associative cache with the same total capacity (4 KB = 2 ways × 64 sets
+× 4 words × 4 bytes) eliminates all single-alias conflict misses.
+SECDED (Single-Error Correcting, Double-Error Detecting) Hamming parity adds 7
+check bits per 32-bit word, detects all 2-bit errors, and corrects all 1-bit errors
+silently — essential for any ASIC claim and good practice on FPGA too.
+
+**Files to modify / create:**
+
+`phase2_cache/rtl/cache_tag_array_2way.sv` — two tag arrays (way 0 and way 1) plus
+one LRU bit per set:
+
+```systemverilog
+module cache_tag_array_2way #(
+    parameter N_SETS = 64,
+    parameter TAG_W  = 22
+)(
+    input  logic              clk, rst,
+    input  logic [$clog2(N_SETS)-1:0] index,
+    // Way 0
+    input  logic              we0, valid_in0, dirty_in0,
+    input  logic [TAG_W-1:0]  tag_in0,
+    output logic              valid_out0, dirty_out0,
+    output logic [TAG_W-1:0]  tag_out0,
+    // Way 1
+    input  logic              we1, valid_in1, dirty_in1,
+    input  logic [TAG_W-1:0]  tag_in1,
+    output logic              valid_out1, dirty_out1,
+    output logic [TAG_W-1:0]  tag_out1,
+    // LRU — 1 bit per set (0=way0 is LRU, 1=way1 is LRU)
+    input  logic              lru_we,
+    input  logic              lru_in,
+    output logic              lru_out
+);
+    logic [TAG_W+1:0] tags0 [0:N_SETS-1];  // {dirty,valid,tag}
+    logic [TAG_W+1:0] tags1 [0:N_SETS-1];
+    logic             lru   [0:N_SETS-1];
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            for (int i=0; i<N_SETS; i++) begin
+                tags0[i] <= '0; tags1[i] <= '0; lru[i] <= '0;
+            end
+        end else begin
+            if (we0)  tags0[index] <= {dirty_in0, valid_in0, tag_in0};
+            if (we1)  tags1[index] <= {dirty_in1, valid_in1, tag_in1};
+            if (lru_we) lru[index] <= lru_in;
+        end
+    end
+
+    assign {dirty_out0, valid_out0, tag_out0} = tags0[index];
+    assign {dirty_out1, valid_out1, tag_out1} = tags1[index];
+    assign lru_out = lru[index];
+endmodule
+```
+
+`phase2_cache/rtl/cache_data_array_2way.sv` — two data SRAM arrays, each 64 sets × 4
+words × 32 bits, with a 39-bit SECDED-protected word (32 data + 7 Hamming parity bits):
+
+```systemverilog
+// SECDED: 7 parity bits p[6:0] for 32-bit data d[31:0]
+// Parity coverage groups (standard [72,64] Hamming extended to [39,32]):
+// p[0] covers d[0,1,3,4,6,8,10,11,13,15,17,19,21,23,25,26,28,30]
+// p[1] covers d[0,2,3,5,6,9,10,12,13,16,17,20,21,24,25,27,28,31]
+// p[2] covers d[1,2,3,7,8,9,10,14,15,16,17,22,23,24,25,29,30,31]
+// p[3] covers d[4,5,6,7,8,9,10,18,19,20,21,22,23,24,25]
+// p[4] covers d[11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]
+// p[5] covers d[26,27,28,29,30,31]
+// p[6] = overall parity (even parity over all 38 bits: SECDED)
+// On read: recompute syndrome; syndrome==0 → no error; syndrome[6]==0 → double error
+//          (uncorrectable); else correct single bit at syndrome[5:0] position.
+function automatic [6:0] secded_encode;
+    input [31:0] d;
+    logic [6:0] p;
+    // (assign each p[i] = XOR of its coverage group — detailed in RTL)
+    secded_encode = p;
+endfunction
+```
+
+`phase2_cache/rtl/cache_controller_2way.sv` — replace `cache_controller.sv`:
+- HIT check: compare tag against both ways; `hit0 = valid0 && (tag0==req_tag)`,
+  `hit1 = valid1 && (tag1==req_tag)`; `hit = hit0 | hit1`
+- On hit: update LRU to mark the hitting way as MRU
+- On miss — FILL way: choose `lru_out` way for replacement (0 or 1)
+- On miss — WRITEBACK: if chosen way is dirty, write it back first
+- SECDED on read: wire syndrome through the function; generate `ecc_error_o` output
+  for CSR logging
+
+**Regression:** All 18 Phase 2 tests must still pass; add 4 new tests:
+`test_conflict_miss_2way` (two addresses with same index, different tags — confirm no
+thrash), `test_lru_replacement` (fill both ways, access way0, confirm way1 is evicted
+next), `test_ecc_single_bit_correct` (inject 1-bit flip in data array, confirm silent
+correction), `test_ecc_double_bit_detect` (inject 2-bit flip, confirm ecc_error_o=1).
+
+---
+
+### 23.4 TRNG Synthesis Ring Oscillator Path
+
+`phase17_peripherals/rtl/trng.sv` wraps the synthesis path in a comment with no RTL.
+On real FPGA the TRNG falls through to the LFSR simulation model silently — a broken
+TRNG is worse than no TRNG because firmware code using `trng_get32()` thinks it is
+getting entropy.
+
+Add the synthesis ring oscillator with proper Xilinx attributes:
+
+```systemverilog
+// trng.sv — replace synthesis stub with real ring oscillator
+`ifdef SIMULATION
+    // LFSR model (kept for sim speed)
+    ...
+`else
+    // Five independently-seeded ring oscillators — odd number of inverters per ring
+    // (5 inverters avoids even-loop optimization by place-and-route)
+    (* KEEP="TRUE", DONT_TOUCH="TRUE" *) logic [4:0] ring_a, ring_b, ring_c;
+    assign ring_a[0] = ~ring_a[4];
+    assign ring_a[1] = ~ring_a[0];
+    assign ring_a[2] = ~ring_a[1];
+    assign ring_a[3] = ~ring_a[2];
+    assign ring_a[4] = ~ring_a[3];
+    // rings b and c same pattern — different net names force independent placement
+    assign ring_b[0] = ~ring_b[4]; /* ... */ 
+    assign ring_c[0] = ~ring_c[4]; /* ... */
+
+    // Von Neumann de-bias: XOR three ring LSBs, accumulate 32 bits
+    logic raw_bit;
+    assign raw_bit = ring_a[0] ^ ring_b[0] ^ ring_c[0];
+
+    always_ff @(posedge clk) begin
+        sr <= {sr[30:0], raw_bit};
+        if (sr_count == 31) begin
+            raw_rand   <= sr;
+            rand_ready <= health_ok;   // gate on FIPS monobit check
+            sr_count   <= 0;
+        end else begin
+            sr_count   <= sr_count + 1;
+            rand_ready <= 1'b0;
+        end
+    end
+`endif
+```
+
+Add `XDC` false-path exceptions for all ring oscillator nets to prevent the timing
+analyser from trying to time them (they are intentionally asynchronous):
+
+```tcl
+# constraints.xdc — TRNG ring oscillator false paths
+set_false_path -to [get_cells {u_trng/ring_a*}]
+set_false_path -to [get_cells {u_trng/ring_b*}]
+set_false_path -to [get_cells {u_trng/ring_c*}]
+```
+
+**Verification:** In simulation the LFSR path still exercises all paths.  
+On hardware (Phase 24), confirm two successive `trng_get32()` calls return different
+values and monobit test never fires health error on 1000 consecutive reads.
+
+---
+
+### 23.5 CDC Hardening — CPU/Peripheral Clock Domain Crossing
+
+The SoC has two clock domains: `clk_cpu` (100 MHz) and `clk_peri` (25 MHz).
+The AXI-to-APB bridge (`axi_apb_bridge.sv`) straddles both domains —
+AXI transactions arrive in `clk_cpu`; APB PSEL/PENABLE/PREADY operate in `clk_peri`.
+Currently the handshake signals cross the boundary without synchronization.
+
+Add explicit 2-FF synchronizers on every control signal that crosses:
+
+```systemverilog
+// cdc_sync2.sv — reusable 2-FF synchronizer
+module cdc_sync2 #(parameter W = 1) (
+    input  logic         clk_dst,
+    input  logic [W-1:0] d,
+    output logic [W-1:0] q
+);
+    (* ASYNC_REG = "TRUE" *) logic [W-1:0] ff1, ff2;
+    always_ff @(posedge clk_dst) begin
+        ff1 <= d;
+        ff2 <= ff1;
+    end
+    assign q = ff2;
+endmodule
+```
+
+In `axi_apb_bridge.sv`, replace direct signal assignments across the boundary with
+`cdc_sync2` instances:
+
+```systemverilog
+// AXI (clk_cpu) → APB (clk_peri): axi_req handshake
+cdc_sync2 u_req_sync (.clk_dst(clk_peri), .d(axi_req),    .q(axi_req_s));
+// APB (clk_peri) → AXI (clk_cpu): pready acknowledgement
+cdc_sync2 u_ack_sync (.clk_dst(clk_cpu),  .d(apb_done_r), .q(apb_done_s));
+```
+
+For the 4:1 clock ratio (100 MHz : 25 MHz), a request in the fast domain is visible
+within 2 slow-clock cycles (80 ns max) — within the 3-cycle APB SETUP minimum.
+Add an XDC max-delay constraint between the two domains:
+
+```tcl
+set_max_delay -datapath_only 10 \
+    -from [get_clocks clk_cpu] -to [get_clocks clk_peri]
+set_max_delay -datapath_only 10 \
+    -from [get_clocks clk_peri] -to [get_clocks clk_cpu]
+```
+
+Also apply `cdc_sync2` to the UART RX pin (external async signal entering `clk_peri`
+domain) and the GPIO interrupt pins (external async → `clk_cpu`).
+
+---
+
+### Phase 23 Completion Checklist
+
+```
+☐ I-cache live in soc_top: icache.sv instantiated, icache_stall wired to hazard_unit
+☐ Branch predictor connected: predict_taken/target routed from soc_top to riscv_core
+☐ Crossbar upgraded to NM=4: M2=icache refill port, all existing M0/M1 tests still pass
+☐ AXI4 burst on D-cache refill: axi_sram.sv accepts ARLEN=3 burst; burst_to_lite removed
+☐ D-cache miss penalty measured ≤ 6 cycles (was ≥ 16 with burst_to_lite)
+☐ 2-way set-associative D-cache: conflict-miss test passes; LRU policy correct
+☐ SECDED: single-bit error corrected silently; double-bit error flags ecc_error_o
+☐ Phase 2 regression: all 18 original cache tests still pass
+☐ TRNG ring oscillator: synthesis path live; XDC false-paths added
+☐ cdc_sync2: all CPU↔peri boundary signals synchronised; ASYNC_REG attributes set
+☐ XDC max-delay constraints added for both clock-crossing directions
+☐ Phase 1, 13, 21 regressions pass after soc_top changes
+```
+
+> ✅ **Resume Bullet**
+> *"Hardened SoC reliability: connected I-cache and branch predictor into the live SoC path, replaced AXI4-Lite burst adapter with native 4-beat AXI4 burst support (cutting D-cache miss penalty from 16 to 6 cycles), upgraded the L1 D-cache from direct-mapped to 2-way set-associative with SECDED ECC, implemented ring-oscillator TRNG for synthesis, and added 2-FF CDC synchronizers on all CPU/peripheral clock crossings with XDC timing constraints."*
+
+🎯 **Interview Questions**
+- What is a conflict miss and why does 2-way set-associativity eliminate it for a single aliased pair?
+- Walk through the SECDED syndrome decode: given a 39-bit word with bit 5 flipped, what value does the syndrome have and which bit do you invert to correct it?
+- A ring oscillator in FPGA depends on routing delay for its frequency. Why does Vivado need `DONT_TOUCH` and `KEEP` attributes, and what happens without them?
+- Why is the 2-FF synchronizer the minimum for crossing clock domains, and what property of flip-flops makes ASYNC_REG important for timing closure?
+- Why does removing `axi4_burst_to_lite.sv` require adding burst counter logic to the SRAM slave rather than just connecting the cache directly?
+
+---
+
+## PHASE 24 — Real Hardware Validation · DDR3 MIG · CI/CD · TRM Hosting
+### ⏱ Weeks 5–8
+
+Phases 1–23 are entirely verified in Icarus Verilog simulation.
+This phase makes the SoC a real, runnable system: synthesising a bitstream, booting
+Hello World on physical FPGA hardware, replacing the DDR3 simulation stub with an
+actual Vivado MIG core, measuring real benchmark numbers (Dhrystone, CoreMark), and
+wiring up a GitHub Actions CI pipeline with a public green-badge README and TRM hosted
+on GitHub Pages.
+
+---
+
+### 24.1 DDR3 Real MIG Integration
+
+`phase10_memory/rtl/mem_ddr3_xilinx.sv` currently ties `init_calib_complete=1'b1`
+in simulation and leaves a comment stub for the MIG instantiation.
+On real hardware the MIG block is required — without it the BRAM backend is the only
+memory, limiting the SoC to 512 KB.
+
+**Step 1 — Generate MIG IP in Vivado:**
+Open Vivado IP Catalog → Memory Interface Generator.
+Configure for the target board DRAM chip (Nexys A7-100T: MT41K128M16JT-125K,
+16-bit bus, 1 GB capacity).
+Vivado generates `mig_7series_0.xci` + wrapper RTL.
+Export the wrapper as `phase10_memory/ip/mig_7series_0/`.
+
+**Step 2 — Replace the stub in `mem_ddr3_xilinx.sv`:**
+
+```systemverilog
+`ifdef SYNTHESIS
+    // Real MIG instantiation
+    mig_7series_0 u_mig (
+        .sys_clk_i          (clk_ref_200mhz),
+        .clk_ref_i          (clk_ref_200mhz),
+        .sys_rst            (!sys_rst_n),
+        // AXI4 slave ports (128-bit, MIG default)
+        .s_axi_awid         (4'd0),
+        .s_axi_awaddr       ({4'b0, s_axi_awaddr}),   // 28-bit MIG addr
+        .s_axi_awlen        (s_axi_awlen),
+        .s_axi_awsize       (s_axi_awsize),
+        .s_axi_awburst      (s_axi_awburst),
+        .s_axi_awvalid      (s_axi_awvalid),
+        .s_axi_awready      (s_axi_awready),
+        .s_axi_wdata        (s_axi_wdata),             // 128-bit
+        .s_axi_wstrb        (s_axi_wstrb),
+        .s_axi_wlast        (s_axi_wlast),
+        .s_axi_wvalid       (s_axi_wvalid),
+        .s_axi_wready       (s_axi_wready),
+        .s_axi_bready       (s_axi_bready),
+        .s_axi_bvalid       (s_axi_bvalid),
+        .s_axi_bresp        (s_axi_bresp),
+        // ... AR, R channels analogously
+        .init_calib_complete(init_calib_complete),
+        // DDR3 physical pins
+        .ddr3_addr          (ddr3_addr),
+        .ddr3_ba            (ddr3_ba),
+        .ddr3_cas_n         (ddr3_cas_n),
+        // ... all DDR3 pins
+    );
+`else
+    assign init_calib_complete = 1'b1;  // sim fast path unchanged
+`endif
+```
+
+**Step 3 — AXI width converter:** The SoC crossbar is 32-bit; MIG expects 128-bit.
+Instantiate Xilinx `axi_dwidth_converter_0` IP (32→128 bit, ratio=4) between the
+SoC's S0 port and the MIG AXI slave. This IP handles packing four 32-bit beats into
+one 128-bit MIG beat automatically.
+
+**Step 4 — Reset interlock:** `soc_rst_n = sys_rst_n && init_calib_complete`.
+If the 10 ms calibration window is not waited, the first DDR3 reads return garbage.
+
+---
+
+### 24.2 Dhrystone and CoreMark Benchmark Measurement
+
+The Phase 22 TRM reports Dhrystone and CoreMark numbers as estimates.
+This section measures the actual values by running the benchmarks through Icarus
+simulation and counting cycles, then verifying on hardware.
+
+**Dhrystone:**
+
+```bash
+# Download RISC-V-ported Dhrystone
+git clone https://github.com/riscv-software-src/riscv-tests.git
+# Extract benchmarks/dhrystone/
+
+# Build with rv32imac target
+riscv32-unknown-elf-gcc -O2 -march=rv32imac -mabi=ilp32 \
+    -DNUMBER_OF_RUNS=1000 \
+    -T phase7_fpga/sw/linker_app.ld \
+    dhrystone.c \
+    -o dhrystone.elf
+
+riscv32-unknown-elf-objcopy -O verilog dhrystone.elf dhrystone.hex
+```
+
+Run the hex through the SoC testbench.
+Dhrystone inserts `mcycle` CSR reads at start and end of the run loop.
+The actual Dhrystone score is then:
+
+```
+DMIPS = (1000 * 1757) / (end_cycle - start_cycle) / (clk_Hz / 1e6)
+```
+
+Update `phase22_portability/trm/08_benchmarks.md` with the measured value, not an
+estimate. Add a note whether it was measured in simulation (cycle-accurate) or on
+hardware.
+
+**CoreMark:** Same process — download `riscv-coremark` port, build, simulate,
+capture the printed `Iterations/Sec` output from the UART model in testbench.
+
+---
+
+### 24.3 FPGA Hardware Boot
+
+After DDR3 MIG integration, generate a bitstream and boot on real hardware.
+
+**Minimum hardware boot sequence:**
+1. `vivado -mode batch -source phase22_portability/scripts/vivado_build.tcl` — produces `my_soc.bit`
+2. `openFPGALoader --board arty_a7_100t my_soc.bit` — programs the board
+3. Open a terminal at 115200 baud on the UART USB port
+4. Power cycle → bootloader 3-second countdown → jumps to Hello World app
+5. Confirm `"Hello, World!\r\n"` appears on UART
+
+**For DE1-SoC (Cyclone V):** Use `quartus_pgm -c USB-Blaster -m JTAG -o "P;my_soc.sof@1"`.
+
+Record the following in `docs/hardware_validation.md`:
+- Board name, FPGA part, Vivado/Quartus version
+- Fmax from timing report (post place-and-route WNS)
+- LUT/FF/BRAM/DSP utilization
+- Photo of terminal output
+- Pass/fail for: Hello World, FreeRTOS blinky, MNIST inference
+
+---
+
+### 24.4 GitHub Actions CI — Full Matrix
+
+Extend `.github/workflows/ci.yml` (written in Phase 16 for parts of the design) to
+cover all 22+ phases:
+
+```yaml
+# .github/workflows/ci.yml
+name: SoC CI
+
+on: [push, pull_request]
+
+jobs:
+  sim_tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        phase: [1, 2, 3, 5, 8, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y iverilog python3-pip
+          pip install cocotb cocotb-tools
+      - name: Run phase ${{ matrix.phase }} tests
+        run: |
+          cd phase${{ matrix.phase }}_*/tb
+          python run_tests.py
+
+  yosys_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y yosys
+      - run: bash phase22_portability/scripts/ci_yosys_check.sh
+
+  firmware_build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y gcc-riscv64-unknown-elf
+      - run: make -C phase22_portability/sdk/examples/hello_world
+      - run: make -C phase22_portability/sdk/examples/secure_ota
+```
+
+Add a CI badge to the main `README.md`:
+```markdown
+[![SoC CI](https://github.com/YOUR_USER/soc/actions/workflows/ci.yml/badge.svg)](...)
+```
+
+---
+
+### 24.5 GitHub Pages TRM Hosting
+
+Convert the Markdown TRM to a navigable website using MkDocs Material theme:
+
+```yaml
+# mkdocs.yml (repo root)
+site_name: RV32 AI SoC — Technical Reference Manual
+theme:
+  name: material
+  palette:
+    scheme: slate
+nav:
+  - Home: phase22_portability/trm/index.md
+  - Architecture Overview: phase22_portability/trm/01_architecture_overview.md
+  - CPU Reference: phase22_portability/trm/02_cpu_reference.md
+  - Memory Map: phase22_portability/trm/03_memory_map.md
+  - Peripheral Reference: phase22_portability/trm/04_peripheral_reference.md
+  - AI Accelerator: phase22_portability/trm/05_accelerator_reference.md
+  - Debug Guide: phase22_portability/trm/06_debug_guide.md
+  - Getting Started: phase22_portability/trm/07_getting_started.md
+  - Benchmarks: phase22_portability/trm/08_benchmarks.md
+```
+
+```yaml
+# .github/workflows/docs.yml
+name: Deploy TRM
+on:
+  push:
+    branches: [master]
+    paths: ['phase22_portability/trm/**', 'mkdocs.yml']
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install mkdocs-material
+      - run: mkdocs gh-deploy --force
+```
+
+Update `README.md` to include a direct link:
+```markdown
+📖 **[Full Technical Reference Manual →](https://YOUR_USER.github.io/soc/)**
+```
+
+---
+
+### Phase 24 Completion Checklist
+
+```
+☐ MIG IP generated for Nexys A7-100T; mem_ddr3_xilinx.sv uses real instantiation under SYNTHESIS
+☐ AXI width converter: 32↔128 bit; DDR3 read/write round-trip — 1 MB, zero errors
+☐ init_calib_complete interlock: SoC held in reset until DDR3 ready — verified in sim
+☐ Dhrystone: measured cycles → DMIPS/MHz value — TRM 08_benchmarks.md updated with real number
+☐ CoreMark: measured cycles → CM/MHz value — TRM updated
+☐ Bitstream generated — Vivado timing report shows WNS ≥ 0 at 100 MHz
+☐ Hello World boots on real FPGA — UART terminal output confirmed
+☐ FreeRTOS blinky confirmed on hardware — LED blinks at correct 500 ms rate
+☐ GitHub Actions: all phases pass on every push — green badge in README
+☐ GitHub Pages: TRM accessible at github.io URL — link in README
+☐ hardware_validation.md: LUT/FF/BRAM/DSP utilization + Fmax recorded
+```
+
+> ✅ **Resume Bullet**
+> *"Validated the SoC on physical Artix-7 hardware: generated and loaded bitstream, booted Hello World and FreeRTOS from UART bootloader, integrated Xilinx DDR3 MIG IP (1 MB zero-error round-trip), and measured Dhrystone/CoreMark scores in simulation. Set up a full GitHub Actions CI matrix covering all phases plus a public MkDocs TRM on GitHub Pages."*
+
+🎯 **Interview Questions**
+- What is DDR3 calibration and why does it require the SoC to be held in reset until it completes?
+- Explain the purpose of an AXI data width converter: what does it do internally to pack four 32-bit beats into one 128-bit MIG beat?
+- How does the Dhrystone benchmark use the `mcycle` CSR to measure performance, and why is this more accurate than wall-clock time on an FPGA?
+- What CI steps should run on every push versus only on release tags, and why?
+
+---
+
+## PHASE 25 — AI Accelerator v4: 64×64 Tiled Systolic Engine
+### ⏱ Weeks 9–17
+
+Phase 18 delivered a 4×4 INT4/INT8 systolic array — enough for a single fully-connected
+layer of a small MNIST network.
+This phase scales the AI capability to production workloads: a 16×16 physical PE array
+(256 MACs, 51.2 GOPS peak INT4 at 100 MHz) driven by a tiling controller that decomposes
+arbitrary MxKxN matrix multiplications into 16×16 tiles, enabling effective 64×64 and
+larger operations.
+A dedicated 64 KB weight SRAM, 16 KB double-buffered activation SRAM, and a 128-bit
+AXI4 DMA engine for bulk weight loading make the accelerator memory-bandwidth-independent
+of the CPU.
+
+The name "64×64" refers to the maximum matrix dimension supported in a single
+`accel_matmul()` API call — the physical PE array is 16×16, and the tiling controller
+sequences 4×4 = 16 tile iterations to complete a 64×64 matmul.
+For matrices larger than 64×64, the software tiling library (updated ONNX tool) decomposes
+further at the C level before each API call.
+
+---
+
+### 25.1 Scale Physical PE Array to 16×16
+
+`phase18_accel/rtl/systolic_array_v3.sv` has `parameter int N = 4`.
+Change the instantiation in `accel_top_v4.sv` to `N = 16`.
+
+At N=16, the PE array contains 256 PEs.
+Each PE is one MAC: 1 DSP48E1 for INT8 (two INT4 per DSP using packing) or 2 DSPs
+for INT8 unpacked. At 1 DSP per INT4 MAC: 256 DSPs.
+Artix-7 XC7A100T has 240 DSPs — 256 exceeds it by 7%.
+Use the `PACK_INT4=1` parameter (two INT4 MACs per DSP via split multiply):
+each DSP computes `(a_hi*b_hi) << 8 + (a_lo*b_lo)` using one 27×18 DSP
+multiply split into two 4×4 multiplies with zero padding. This fits 256 INT4 MACs
+into 128 DSPs — well within the 240 available.
+
+```systemverilog
+// accel_top_v4.sv — systolic array instantiation
+systolic_array_v3 #(
+    .N     (16),    // 16×16 physical PE array
+    .ACT_W (4),     // INT4 mode — 2 MACs per DSP48E1
+    .ACCW  (32)
+) u_sa (
+    .clk    (clk),
+    .rst_n  (rst_n),
+    // weight/activation feeds from tiling controller (not APB directly)
+    .w_row_in  (tc_w_row),
+    .a_vec_in  (tc_a_vec),
+    .start_i   (tc_start),
+    .done_o    (sa_done),
+    .y_out     (sa_y)
+);
+```
+
+Synthesis timing: with 16 rows, the stagger-feed FSM runs for 16+2=18 cycles per tile.
+At 100 MHz that is 180 ns per 16×16×16 = 4096 MACs = 22.8 TOPS equivalent throughput
+(if pipelined continuously).
+
+---
+
+### 25.2 Tiling Controller — `tiling_controller.sv`
+
+The tiling controller decomposes an M×K×N matrix multiplication into ceil(M/16) ×
+ceil(K/16) × ceil(N/16) 16×16 tile iterations and drives the systolic array.
+
+**Register interface (AXI4-Lite slave at ACCEL_BASE = 0x50000000):**
+
+```
+Offset  Name       Access  Description
+0x00    CTRL       W       [0]=start, [1]=mode (0=matmul, 1=conv), [2]=relu_en
+0x04    STATUS     R       [0]=done, [1]=busy, [2]=ecc_err
+0x08    DIM_M      W       Matrix M dimension (rows of A), max 64
+0x0C    DIM_K      W       Matrix K dimension (inner), max 64
+0x10    DIM_N      W       Matrix N dimension (cols of B), max 64
+0x14    WEIGHT_BASE W      AXI byte address of weight matrix B in DDR3/BRAM
+0x18    ACT_BASE   W       AXI byte address of activation matrix A in DDR3/BRAM
+0x1C    OUT_BASE   W       AXI byte address of output buffer in DDR3/BRAM
+0x20    BATCH_SIZE W       Number of consecutive matmul ops (A rows stride by M)
+0x24    IRQ_MASK   W       [0]=done_irq_en
+```
+
+**Tiling FSM:**
+
+```
+IDLE → LOAD_WEIGHTS → LOAD_ACT → COMPUTE → WRITE_OUT → 
+    → (next tile) LOAD_ACT → COMPUTE → WRITE_OUT →
+    → (all tiles done) IDLE
+```
+
+Each tile iteration:
+1. `LOAD_WEIGHTS`: DMA reads 16×16 × 1 byte = 256 bytes from `WEIGHT_BASE + tile_col*16 + tile_k*K*16`
+2. `LOAD_ACT`: DMA reads 16×16 × 1 byte = 256 bytes from `ACT_BASE + tile_row*K*16 + tile_k*16`
+3. `COMPUTE`: Assert systolic array `start_i`; wait `done_o` (18 cycles)
+4. Accumulate partial sums: `out_accum[i][j] += y_out[i][j]` for each tile_k iteration
+5. `WRITE_OUT` (after last tile_k): DMA writes 16×16 × 4 bytes = 1024 bytes to OUT_BASE
+
+```systemverilog
+// tiling_controller.sv — key parameters and types
+module tiling_controller (
+    input  logic        clk, rst_n,
+    // Dimension config (written by CPU before CTRL.start)
+    input  logic [6:0]  dim_m, dim_k, dim_n,    // up to 64 each
+    input  logic [31:0] weight_base, act_base, out_base,
+    input  logic        start_i,
+    output logic        done_o, busy_o,
+    // Systolic array control
+    output logic [255:0] tc_w_row,    // 16 rows × 16 INT4 = 64 bytes packed
+    output logic [63:0]  tc_a_vec,    // 16 INT4 activations packed
+    output logic         tc_start,
+    input  logic         sa_done,
+    input  logic [511:0] sa_y,        // 16 INT32 outputs packed
+    // DMA interface (128-bit AXI4 master)
+    output logic         dma_start,
+    output logic [31:0]  dma_src, dma_dst,
+    output logic [15:0]  dma_len,
+    output logic         dma_dir,     // 0=read (load), 1=write (store)
+    input  logic         dma_done
+);
+```
+
+**Tile address calculation:**
+For a standard row-major matrix layout:
+- Weight tile `(tk, tn)`: byte address = `WEIGHT_BASE + (tk*16*N + tn*16) * ELEM_BYTES`
+- Activation tile `(tm, tk)`: byte address = `ACT_BASE + (tm*16*K + tk*16) * ELEM_BYTES`
+- Output tile `(tm, tn)`: byte address = `OUT_BASE + (tm*16*N + tn*16) * sizeof(int32)`
+
+---
+
+### 25.3 Weight SRAM and Double-Buffered Activation SRAM
+
+To keep the systolic array running without stalling on DMA, pre-stage weights and
+activations in dedicated SRAMs that the DMA can fill while the array is computing.
+
+**Weight SRAM (`weight_sram.sv`):**
+- Capacity: 32 KB (enough for two full 16×16 INT8 tiles: 2 × 256 bytes — plus
+  headroom for INT32 partial sum accumulation, 16×16×4 = 1 KB)
+- Interface: AXI4 write port (128-bit burst from DMA) + synchronous read port
+  (tiling controller, word-wide for row feeds)
+
+```systemverilog
+// weight_sram.sv
+module weight_sram #(
+    parameter DEPTH = 8192   // 32 KB ÷ 4 bytes
+)(
+    input  logic        clk,
+    // AXI4-Lite write port (DMA load)
+    input  logic        aw_valid, w_valid,
+    input  logic [14:0] aw_addr,
+    input  logic [31:0] w_data,
+    input  logic [3:0]  w_strb,
+    output logic        aw_ready, w_ready,
+    // Synchronous read port (tiling controller)
+    input  logic [12:0] rd_addr,
+    output logic [31:0] rd_data
+);
+    logic [31:0] mem [0:DEPTH-1];
+    always_ff @(posedge clk) begin
+        if (w_valid && aw_valid) mem[aw_addr[14:2]] <= w_data;
+        rd_data <= mem[rd_addr];
+    end
+endmodule
+```
+
+**Activation double-buffer (`act_buffer.sv`):**
+Two 8 KB SRAMs (ping and pong).
+While the array computes on ping, the DMA fills pong with the next tile's activations.
+After `sa_done`, the tiling controller flips `buf_sel` to swap them.
+
+```systemverilog
+// act_buffer.sv
+module act_buffer #(parameter DEPTH = 2048) (  // 8 KB ÷ 4
+    input  logic        clk,
+    input  logic        buf_sel,       // 0=compute on ping / fill pong; 1=swap
+    // DMA write port (always writes to inactive buffer)
+    input  logic        dma_we,
+    input  logic [10:0] dma_addr,
+    input  logic [31:0] dma_wdata,
+    // Tiling controller read port (reads from active buffer)
+    input  logic [10:0] sa_addr,
+    output logic [31:0] sa_rdata
+);
+    logic [31:0] ping [0:DEPTH-1];
+    logic [31:0] pong [0:DEPTH-1];
+    always_ff @(posedge clk) begin
+        if (dma_we) begin
+            if ( buf_sel) ping[dma_addr] <= dma_wdata;
+            else          pong[dma_addr] <= dma_wdata;
+        end
+        sa_rdata <= buf_sel ? pong[sa_addr] : ping[sa_addr];
+    end
+endmodule
+```
+
+---
+
+### 25.4 128-Bit AXI4 DMA Engine — `accel_dma_v2.sv`
+
+The Phase 18 scatter-gather DMA (`sg_dma.sv`) is 32-bit.
+For bulk weight loading, 32-bit transfers are 4× too slow: loading 256 bytes of
+weights for one tile takes 64 individual 32-bit AXI transactions.
+A 128-bit AXI4 master loads the same 256 bytes in 16 beats = 16 cycles.
+
+```systemverilog
+// accel_dma_v2.sv — 128-bit burst DMA
+module accel_dma_v2 (
+    input  logic        clk, rst_n,
+    // Control (from tiling controller)
+    input  logic        start_i,
+    input  logic [31:0] src_addr_i, dst_addr_i,
+    input  logic [15:0] byte_len_i,   // must be multiple of 16
+    input  logic        direction_i,  // 0=read (DDR→SRAM), 1=write (SRAM→DDR)
+    output logic        done_o,
+    // AXI4 master (128-bit)
+    output logic        m_arvalid,
+    input  logic        m_arready,
+    output logic [31:0] m_araddr,
+    output logic [7:0]  m_arlen,      // burst length − 1
+    output logic [2:0]  m_arsize,     // 3'b100 = 16 bytes per beat
+    output logic [1:0]  m_arburst,    // 2'b01 = INCR
+    input  logic        m_rvalid,
+    output logic        m_rready,
+    input  logic [127:0] m_rdata,
+    input  logic        m_rlast,
+    // Write channel analogously
+    ...
+    // Local SRAM write port
+    output logic        sram_we,
+    output logic [11:0] sram_addr,
+    output logic [127:0] sram_wdata
+);
+```
+
+**Burst calculation:**
+`ARLEN = byte_len / 16 − 1` (since ARSIZE=4 means 16 bytes per beat).
+For a 256-byte tile: ARLEN=15, 16 beats, 16 clock cycles at 100 MHz = 160 ns.
+
+> ⚠️ **Icarus Compatibility:** 128-bit `logic [127:0]` is fine in Icarus 12 as a port
+> but cannot be used in a port bit-select (`m_rdata[127:96]`) inside `always_comb`.
+> Extract to a named `assign` outside the block:
+> `assign rdata_word3 = m_rdata[127:96];`
+
+---
+
+### 25.5 End-to-End 64×64 INT4 Matrix Multiply Test
+
+**Software API (updated `accel.h`):**
+
+```c
+// Blocking API — fires tiling controller and polls STATUS.done
+int accel_matmul64(
+    int8_t  *A,       // M×K INT4, packed (2 values per byte)
+    int8_t  *B,       // K×N INT4, packed
+    int32_t *C,       // M×N INT32 output
+    int M, int K, int N  // dimensions, max 64 each
+);
+
+// Non-blocking — call accel_matmul64_wait() to poll or use IRQ
+void accel_matmul64_start(int8_t *A, int8_t *B, int32_t *C, int M, int K, int N);
+void accel_matmul64_wait(void);
+```
+
+**Golden reference test in Python (`test_accel_v4.py`):**
+
+```python
+import numpy as np
+def golden_matmul_int4(A, B):
+    # Dequantize packed INT4 to INT8
+    A8 = unpack_int4(A); B8 = unpack_int4(B)
+    return A8.astype(np.int32) @ B8.astype(np.int32)
+
+@cocotb.test()
+async def test_matmul_64x64(dut):
+    rng = np.random.default_rng(42)
+    A = rng.integers(-8, 7, (64, 64), dtype=np.int8)
+    B = rng.integers(-8, 7, (64, 64), dtype=np.int8)
+    expected = A.astype(np.int32) @ B.astype(np.int32)
+    # load A, B into BRAM via AXI; fire CTRL.start; wait done IRQ
+    # read C from BRAM; assert np.array_equal(C_dut, expected)
+```
+
+---
+
+### 25.6 Updated ONNX→C Tool for Tiled Execution
+
+Update `phase18_accel/tools/onnx_to_c.py` to emit weight tensors pre-arranged in
+tile-major order (K-tile-major, then N-tile) so the DMA can load each tile with a
+single contiguous burst:
+
+```python
+def export_tiled_weights(W, tile=16):
+    """Re-order weight matrix into tile-major layout for the DMA.
+    Input:  W[K, N]   (row-major)
+    Output: W_tiled[num_k_tiles, num_n_tiles, tile, tile]  (contiguous per tile)
+    """
+    K, N = W.shape
+    K_tiles = (K + tile - 1) // tile
+    N_tiles = (N + tile - 1) // tile
+    W_pad = np.pad(W, [(0, K_tiles*tile-K), (0, N_tiles*tile-N)])
+    return W_pad.reshape(K_tiles, tile, N_tiles, tile).transpose(0,2,1,3)
+```
+
+The emitted C header:
+```c
+// weights_fc1.h — tiled layout for 64×64 fc layer
+// Dimensions: M=64, K=64, N=64 (K_tiles=4, N_tiles=4)
+// Size: 4×4 tiles × 256 bytes = 4096 bytes
+__attribute__((aligned(16))) const int8_t fc1_weights[4096] = { ... };
+```
+
+---
+
+### 25.7 Performance Targets at 100 MHz
+
+| Operation | Dimensions | Tile Iterations | Cycles | Latency |
+|-----------|-----------|-----------------|--------|---------|
+| GEMM INT4 | 16×16×16 | 1×1×1 = 1 | ~40 | 0.4 µs |
+| GEMM INT4 | 64×64×64 | 4×4×4 = 64 | ~2560 | 25.6 µs |
+| FC layer INT4 | 784→64 | ceil(784/16)=49 tiles | ~2000 | 20 µs |
+| LeNet-5 MNIST | 28×28→10 | full network | ~8000 | 80 µs |
+
+Peak INT4 throughput: 16×16×2 MACs/cycle × 100 MHz = **51.2 GOPS**.
+
+---
+
+### Phase 25 Completion Checklist
+
+```
+☐ systolic_array_v3 instantiated with N=16 in accel_top_v4.sv; 256 MACs verified
+☐ tiling_controller.sv: 64×64×64 matmul produces correct INT32 output vs NumPy reference
+☐ weight_sram.sv: 256-byte tile DMA load in ≤ 16 cycles (128-bit DMA)
+☐ act_buffer.sv: double-buffer flip correct — no bubble between tiles
+☐ accel_dma_v2.sv: 128-bit AXI4 burst; ARLEN/ARSIZE/ARBURST correct; rlast terminates
+☐ 16×16 tile latency: ≤ 40 cycles from start_i to sa_done
+☐ 64×64 full matmul: total latency ≤ 2600 cycles (64 tiles + DMA overhead)
+☐ INT4 packing: 2 INT4 per DSP48E1 — 256 MACs fits in ≤ 128 DSPs (Artix-7 budget)
+☐ onnx_to_c.py: tiled weight layout emitted correctly; verified round-trip
+☐ test_accel_v4.py: 64×64 golden matmul passes; edge cases (M/K/N not multiples of 16)
+☐ MNIST FC network (784→128→10): inference correct; latency ≤ 100 µs
+☐ Phase 18 regression: all 59 original accelerator tests still pass
+```
+
+> ✅ **Resume Bullet**
+> *"Scaled the INT4 systolic array from 4×4 to 16×16 physical PEs (256 MACs, 51.2 GOPS peak) with a tiling controller supporting up to 64×64 matrix dimensions, a 64 KB weight SRAM, double-buffered 16 KB activation SRAM, and a 128-bit AXI4 DMA engine; completed a 64×64×64 INT4 GEMM in 25.6 µs at 100 MHz with correct NumPy-verified output."*
+
+🎯 **Interview Questions**
+- Why does a 16×16 physical PE array support "64×64" matrix multiply, and what is the role of the tiling controller?
+- Explain how two INT4 MACs can share one DSP48E1. What constraint does this place on the bit widths of A and B inputs?
+- What is double buffering in the context of the activation SRAM and why does it eliminate pipeline bubbles between tiles?
+- If the tiling controller must load a 256-byte weight tile from DDR3 at 128-bit width, calculate ARLEN and the number of clock cycles required.
+- Why must weights be stored in tile-major rather than row-major order for efficient DMA loading?
+
+---
+
+## PHASE 26 — S-Mode Privilege + Sv32 MMU (Linux-Bootable)
+### ⏱ Weeks 18–25
+
+Phases 1–25 implement only machine-mode (M-mode).
+Without supervisor mode (S-mode) and a Memory Management Unit, the SoC cannot run a
+Linux kernel — the entire class of Linux-based AI deployment (running PyTorch inference
+with a real OS, containers, file system) is unavailable.
+This phase adds S-mode privilege, the RISC-V Sv32 page-table walker, an 8-entry
+fully-associative TLB with ASID tagging, and OpenSBI as the M-mode firmware interface
+so that Linux can boot and eventually print to UART.
+
+Adding an MMU also elevates the SoC from a microcontroller to a microprocessor —
+the most common interview differentiation question in VLSI interviews.
+
+---
+
+### 26.1 S-Mode Privilege Level
+
+Add a `privilege` register to the pipeline.  
+RISC-V has three privilege levels: M (machine = 3), S (supervisor = 1), U (user = 0).
+The current design always operates in M-mode.
+
+**New file `phase1_riscv_core/rtl/privilege.sv`:**
+
+```systemverilog
+module privilege (
+    input  logic       clk, rst_n,
+    // Exception/interrupt → always enters M-mode
+    input  logic       trap_enter,
+    // MRET → restores MPP field; SRET → restores SPP field
+    input  logic       mret, sret,
+    // Previous privilege from CSR MPP/SPP fields
+    input  logic [1:0] mpp,     // from mstatus[12:11]
+    input  logic       spp,     // from mstatus[8]
+    output logic [1:0] mode     // current privilege: 2=M, 1=S, 0=U
+);
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)       mode <= 2'b11;    // boot in M-mode
+        else if (trap_enter) mode <= 2'b11; // all traps → M-mode
+        else if (mret)    mode <= mpp;      // MRET → return to MPP
+        else if (sret)    mode <= {1'b0, spp}; // SRET → return to SPP
+    end
+endmodule
+```
+
+Wire `mode` from `privilege.sv` into `csr_file.sv` (to gate CSR accessibility per mode)
+and into `pmp_checker.sv` (M-mode ignores PMP for unlocked regions).
+
+---
+
+### 26.2 S-Mode CSRs
+
+Add the following CSRs to `phase1_riscv_core/rtl/csr_file.sv`:
+
+| CSR Address | Name | Description |
+|---|---|---|
+| 0x100 | sstatus | S-mode status (subset of mstatus: SIE, SPIE, SPP, SUM, MXR) |
+| 0x104 | sie | S-mode interrupt enable |
+| 0x105 | stvec | S-mode trap vector base address |
+| 0x106 | scounteren | S-mode counter enable |
+| 0x140 | sscratch | S-mode scratch register |
+| 0x141 | sepc | S-mode exception PC |
+| 0x142 | scause | S-mode exception cause |
+| 0x143 | stval | S-mode trap value (bad address) |
+| 0x144 | sip | S-mode interrupt pending |
+| 0x180 | satp | Sv32 page table base + ASID + MODE |
+
+`sstatus` is a read/write shadow of specific bits in `mstatus`.  
+`satp` format: `{1'b1, asid[8:0], ppn[21:0]}` where MODE=1 enables Sv32 translation.
+
+**SRET instruction** — add to `decode_stage.sv` as a new opcode decode (`7'b1110011`,
+funct12=`12'h102`). In execute, SRET raises privilege to SPP and jumps to `sepc`.
+
+---
+
+### 26.3 Sv32 Page Table Walker — `ptw.sv`
+
+Sv32 uses a two-level page table. Virtual addresses are 32 bits split as:
+`VA[31:22]` = VPN[1] (10 bits), `VA[21:12]` = VPN[0] (10 bits), `VA[11:0]` = page offset.
+
+**Page table entry (PTE) format:**
+`{ppn1[11:0], ppn0[9:0], rsw[1:0], D, A, G, U, X, W, R, V}` — 32 bits.
+
+**Two-level walk:**
+1. Read root PTE: `mem[satp.ppn << 12 | VPN[1] << 2]`
+2. If PTE.V=0 → page fault. If PTE.R|W|X ≠ 0 → leaf (superpage, rare). Else:
+3. Read leaf PTE: `mem[PTE.ppn << 12 | VPN[0] << 2]`
+4. Check permissions (R/W/X vs current privilege and access type)
+5. Physical address: `{PTE.ppn1, PTE.ppn0, VA[11:0]}`
+
+```systemverilog
+module ptw (
+    input  logic        clk, rst_n,
+    // TLB miss input
+    input  logic        miss_i,
+    input  logic [31:0] vaddr_i,
+    input  logic [1:0]  access_type_i,  // 0=fetch, 1=load, 2=store
+    input  logic        satp_mode_i,    // 1=Sv32 enabled
+    input  logic [21:0] satp_ppn_i,
+    // Page fault outputs
+    output logic        fault_o,
+    output logic [3:0]  fault_cause_o,  // mcause code
+    // PTE fill output (to TLB)
+    output logic        fill_o,
+    output logic [31:0] vaddr_fill_o,
+    output logic [31:0] paddr_fill_o,
+    output logic [7:0]  perms_fill_o,   // {D,A,G,U,X,W,R,V}
+    // AXI4-Lite memory read port (walks physical memory)
+    output logic        ptw_arvalid,
+    input  logic        ptw_arready,
+    output logic [31:0] ptw_araddr,
+    input  logic        ptw_rvalid,
+    output logic        ptw_rready,
+    input  logic [31:0] ptw_rdata,
+    input  logic [1:0]  ptw_rresp
+);
+    // FSM: IDLE → FETCH_L1 → WAIT_L1 → FETCH_L2 → WAIT_L2 → FILL/FAULT
+```
+
+The PTW is the critical path for every TLB miss. Its AXI latency (2–4 cycles for BRAM)
+means a TLB miss costs 4–8 extra pipeline cycles.
+With a well-sized TLB (8 entries), Linux kernel execution sees TLB hit rates >97% on
+typical workloads — miss penalty is small in practice.
+
+---
+
+### 26.4 8-Entry Fully-Associative TLB — `tlb.sv`
+
+```systemverilog
+module tlb #(
+    parameter N_ENTRIES = 8
+)(
+    input  logic        clk, rst_n,
+    // Lookup port (synchronous, 1-cycle)
+    input  logic        lookup_valid_i,
+    input  logic [31:0] vaddr_i,
+    input  logic [8:0]  asid_i,          // from satp.ASID
+    output logic        hit_o,
+    output logic [31:0] paddr_o,
+    output logic [7:0]  perms_o,
+    // Fill port (from PTW)
+    input  logic        fill_i,
+    input  logic [31:0] vaddr_fill_i,
+    input  logic [31:0] paddr_fill_i,
+    input  logic [8:0]  asid_fill_i,
+    input  logic [7:0]  perms_fill_i,
+    // Flush
+    input  logic        flush_all_i,     // sfence.vma with rs1=0, rs2=0
+    input  logic        flush_asid_i,    // sfence.vma with rs2≠0
+    input  logic [8:0]  flush_asid_val_i
+);
+    // 8 entries: {valid, global, asid[8:0], vpn[19:0], ppn[19:0], perms[7:0]}
+    // Fully-associative: check all 8 VPN tags in parallel
+    // Replacement: round-robin (simple, avoids LRU state complexity)
+    // Match condition: valid && (global || asid==asid_i) && vpn==vaddr_i[31:12]
+```
+
+**`sfence.vma` instruction** — flush TLB on context switch.
+Decode as `7'b1110011`, funct7=`7'b0001001` in `decode_stage.sv`.
+Assert `flush_all_i` on `sfence.vma x0,x0`; `flush_asid_i` on `sfence.vma x0,asid`.
+
+---
+
+### 26.5 MMU Integration in soc_top
+
+The MMU sits between the CPU's virtual fetch/load/store addresses and the physical
+AXI crossbar.
+When `satp.MODE=1`, every access is translated; when `satp.MODE=0` or the CPU is in
+M-mode, addresses pass through unchanged.
+
+```systemverilog
+// mmu.sv — top-level MMU wrapper
+module mmu (
+    input  logic [1:0]  priv_mode_i,   // from privilege.sv
+    input  logic        satp_mode_i,
+    input  logic [21:0] satp_ppn_i,
+    input  logic [8:0]  satp_asid_i,
+    // Virtual address input (from CPU)
+    input  logic [31:0] fetch_vaddr_i,
+    input  logic [31:0] load_vaddr_i,
+    input  logic [31:0] store_vaddr_i,
+    // Physical address output (to AXI crossbar)
+    output logic [31:0] fetch_paddr_o,
+    output logic [31:0] load_paddr_o,
+    output logic [31:0] store_paddr_o,
+    // Stall (while PTW is walking)
+    output logic        mmu_stall_o,
+    // Page faults
+    output logic        fetch_fault_o, load_fault_o, store_fault_o,
+    output logic [3:0]  fault_cause_o
+);
+    // Instantiates tlb + ptw; TLB hit → immediate passthrough;
+    // TLB miss → assert mmu_stall_o, start PTW, fill TLB, deassert stall
+```
+
+Wire `mmu_stall_o` into the hazard unit's stall input (same path as `icache_stall_i`).
+Page faults (`fetch_fault_o`, `load_fault_o`, `store_fault_o`) feed the exception bus
+with the appropriate cause code (12=fetch page fault, 13=load page fault, 15=store
+page fault).
+
+---
+
+### 26.6 OpenSBI Port
+
+OpenSBI is the RISC-V M-mode runtime that exposes SBI (Supervisor Binary Interface)
+calls to the Linux kernel — the equivalent of a BIOS for RISC-V.
+Linux calls SBI for console output, system shutdown, and timer setup before its own
+drivers load.
+
+Create `phase26_linux/sw/opensbi/` directory and port the generic OpenSBI platform:
+
+```
+phase26_linux/
+├── sw/
+│   └── opensbi/
+│       ├── platform/rv32_soc/
+│       │   ├── platform.c     — uart_putchar, timer_init, ipi_send
+│       │   └── objects.mk     — platform makefile fragment
+│       └── fw_jump.bin        — compiled OpenSBI firmware image
+└── tb/
+    └── test_linux_boot.py     — cocotb test that drives SoC to "Booting Linux..."
+```
+
+**Minimum `platform.c` functions:**
+
+```c
+// fw_base = 0x80000000 (DDR3 start)
+// fw_jump target = 0x80200000 (Linux kernel load address)
+
+static void rv32_soc_console_putc(char c) {
+    while (!(REG32_RD(UART_BASE, 0x0C) & 0x20));  // wait TX FIFO not full
+    REG32_WR(UART_BASE, 0x00, c);
+}
+
+static u64 rv32_soc_timer_value(void) {
+    return REG32_RD(CLINT_BASE, 0xBFF8);  // mtime low 32 bits
+}
+
+static void rv32_soc_timer_event(u64 next_val) {
+    REG32_WR(CLINT_BASE, 0x4000, (uint32_t)next_val);  // mtimecmp
+}
+```
+
+**Linux kernel device tree** — the DTS from Phase 22 (`rv32_soc.dts`) is the starting
+point. Add the OpenSBI `mmode_resv` reserved memory node and set `chosen/bootargs` to
+`"earlycon=uart8250,mmio,0x10001000,115200n8 console=ttyS0,115200"`.
+
+**Minimum kernel config** (`rv32_soc_defconfig`): `CONFIG_RISCV_SBI=y`,
+`CONFIG_SERIAL_8250=y`, `CONFIG_SERIAL_8250_CONSOLE=y`, `CONFIG_INITRAMFS_SOURCE=""`.
+
+---
+
+### Phase 26 Completion Checklist
+
+```
+☐ privilege.sv: mode register transitions M→M (trap), M→S (MRET with MPP=1), S→U (SRET)
+☐ S-mode CSRs: sstatus/stvec/sepc/scause/stval/satp all readable and writable from S-mode
+☐ SRET instruction: decoded and causes privilege restore + PC jump to sepc
+☐ sfence.vma: flushes all 8 TLB entries; verified by refetching TLB-resident address after flush
+☐ TLB: hit on repeated same-page access; miss triggers PTW; fill verified
+☐ PTW: 2-level walk for a mapped page produces correct physical address
+☐ PTW: page fault (PTE.V=0) generates correct mcause and redirects to mtvec
+☐ MMU stall: pipeline stalls for exactly 4 cycles during PTW BRAM lookup
+☐ mmu.sv: M-mode with satp.MODE=0 passes addresses unchanged (no translation)
+☐ OpenSBI: compiles for rv32_soc platform; uart_putchar and timer_init work
+☐ Simulation boot: SoC loads OpenSBI, OpenSBI prints "OpenSBI vX.Y" to UART model
+☐ Phase 13/21 regression: 71/71 + 76/76 tests still pass after privilege changes
+```
+
+> ✅ **Resume Bullet**
+> *"Elevated the RV32 SoC from a microcontroller to a Linux-capable microprocessor by adding S-mode privilege, 8-entry fully-associative TLB, 2-level Sv32 page table walker, and S-mode CSR bank; ported OpenSBI as the M-mode runtime so the Linux kernel boots to early console output."*
+
+🎯 **Interview Questions**
+- Explain the Sv32 two-level page table walk: given VA=0xC0010000 and a root PTE that points to a second-level table, write out the two physical addresses the PTW must read.
+- What is the difference between `sfence.vma x0,x0` and `sfence.vma rs1,x0`, and when would the OS use each?
+- Why does the PTW need its own AXI port to physical memory rather than reusing the CPU's load port?
+- What is OpenSBI and what three services must it provide before the Linux kernel can reach its own device drivers?
+- A TLB has 8 entries and uses round-robin replacement. A workload accesses 9 unique pages in sequence then repeats. What is the TLB hit rate on the second pass?
+
+---
+
+## PHASE 27 — Formal Verification · RISC-V Compliance Suite · Full CI/CD
+### ⏱ Weeks 26–29
+
+Phases 21 and 22 have SVA properties and a Yosys check — the skeletons are there but
+the formal BMC was never actually run (the `.ys` script is a stub), and the RISC-V
+Architectural Test Suite has never been wired into the flow.
+This phase closes both gaps: runs SymbiYosys BMC to depth 30 on the five core pipeline
+properties, wires the official `riscv-arch-test` suite for rv32imac, and extends the
+GitHub Actions CI from Phase 24 to include formal results and compliance status.
+
+---
+
+### 27.1 SymbiYosys BMC — Pipeline Safety Properties
+
+Five safety properties from `phase21_production/formal/core_props.sv` must pass BMC
+at depth 30 with no counterexample.
+
+Update `phase21_production/formal/run_bmc.ys` from skeleton to a complete sby config:
+
+```
+# phase21_production/formal/core_props.sby
+[options]
+mode bmc
+depth 30
+engine boolector
+
+[engines]
+smtbmc boolector
+
+[script]
+read_verilog -sv -formal phase1_riscv_core/rtl/alu.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/reg_file.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/imm_gen.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/fetch_stage.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/decode_stage.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/execute_stage.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/memory_stage.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/writeback_stage.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/hazard_unit.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/forwarding_unit.sv
+read_verilog -sv -formal phase1_riscv_core/rtl/riscv_core.sv
+read_verilog -sv -formal phase21_production/formal/core_props.sv
+hierarchy -top core_props
+prep -flatten
+```
+
+**The five properties (already written in `core_props.sv`, just never run):**
+
+```systemverilog
+// P1: x0 invariant — rd=0 never modifies the register file
+P1_x0_invariant: assert property (
+    @(posedge clk) disable iff (!rst_n)
+    (dut.u_regfile.we && dut.u_regfile.rd == 5'd0) |->
+    ##1 (dut.u_regfile.rf[0] == 32'd0)
+);
+
+// P2: PC alignment — fetch address always word-aligned (except RVC)
+P2_pc_aligned: assert property (
+    @(posedge clk) disable iff (!rst_n)
+    dut.pc_if[1:0] == 2'b00    // RVC relaxes to [0]==0; check depends on RVC enable
+);
+
+// P3: Branch flush creates exactly 2 bubbles
+P3_branch_flush_2_bubbles: assert property (
+    @(posedge clk) disable iff (!rst_n)
+    $rose(dut.branch_taken_ex) |->
+    ##1 (dut.u_pipeline_IF_ID.instr_o == NOP) &&
+    ##2 (dut.u_pipeline_ID_EX.alu_ctrl_o == 4'd0)
+);
+
+// P4: Load-use stall result correct (no stale forwarding)
+P4_load_use_stall: assert property (
+    @(posedge clk) disable iff (!rst_n)
+    dut.load_use_stall |-> ##2 (dut.rs1_id == dut.rd_ex)
+);
+
+// P5: Reset guarantees PC=0
+P5_reset_pc_zero: assert property (
+    @(posedge clk)
+    $fell(rst_n) |-> ##1 (dut.pc_if == 32'd0)
+);
+```
+
+Run with: `sby -f phase21_production/formal/core_props.sby`
+
+Expected result: `PASS` for all 5 properties at depth 30.
+If any property fails, sby produces a VCD counterexample — open in GTKWave to find
+the failing cycle sequence.
+
+---
+
+### 27.2 RISC-V Architectural Test Suite (riscv-arch-test)
+
+The official RISC-V Foundation compliance test suite is at
+`github.com/riscv-non-isa/riscv-arch-test`.
+Passing it is the standard industry claim for ISA compliance.
+
+**Integration steps:**
+
+```bash
+# 1. Clone the test suite
+git clone https://github.com/riscv-non-isa/riscv-arch-test.git
+
+# 2. Build each test binary
+make -C riscv-arch-test RISCV_TARGET=spike RISCV_DEVICE=rv32i_m/I
+# For each extension: I, M, A, C, Zicsr, Zifencei
+
+# 3. Run through SoC simulation (adaptor script)
+python3 phase27_compliance/tb/run_arch_tests.py \
+    --suite rv32i_m/I \
+    --sim icarus
+```
+
+**Adaptor** (`phase27_compliance/tb/run_arch_tests.py`):
+- Converts each test ELF to `.hex` using `riscv32-unknown-elf-objcopy`
+- Loads into `instr_rom.sv`, runs the Icarus simulation
+- The test writes a 64-byte signature to `tohost` SRAM address
+- Compare byte-by-byte against the golden `.reference_output` file
+
+```python
+def run_one_test(elf_path, ref_path):
+    hex_path = elf_to_hex(elf_path)
+    sig = run_simulation(hex_path, tohost_addr=0x1000, sig_len=64)
+    ref = Path(ref_path).read_bytes()
+    return sig == ref, sig, ref
+```
+
+**Test counts:**
+
+| Extension | Tests |
+|---|---|
+| rv32i_m/I (base integer) | ~120 |
+| rv32i_m/M (multiply) | ~40 |
+| rv32i_m/A (atomics) | ~15 |
+| rv32i_m/C (compressed) | ~60 |
+| rv32i_m/Zicsr | ~10 |
+| **Total** | **~245** |
+
+All 245 tests must produce a byte-exact match against the reference signatures.
+
+---
+
+### 27.3 Coverage Closure
+
+Add a coverage closure gate before Phase 28 begins.
+Measure two types of coverage using `phase21_production/tb/test_coverage_stress.py`:
+
+**Toggle coverage** (via Icarus VPI or Verilator):
+Every RTL signal in `riscv_core.sv` must toggle 0→1 and 1→0 at least once across
+the full test suite. Target: ≥ 98% toggle.
+
+**Functional branch coverage** (via Python post-processing):
+The test runner reports which `always_ff/comb` branches were taken.
+For `cache_controller_2way.sv`, every state transition (IDLE→TAG_CHECK→HIT,
+IDLE→TAG_CHECK→FILL, etc.) must be exercised.
+Target: ≥ 95% functional branch coverage.
+
+Create `phase27_compliance/tb/coverage_report.py` that:
+1. Runs the full cocotb test suite with Icarus VPI coverage hooks
+2. Parses the `.vcd` or coverage dump
+3. Emits `coverage_report.html` with per-module toggle and branch tables
+
+---
+
+### 27.4 Full GitHub Actions Pipeline Update
+
+```yaml
+# .github/workflows/ci.yml — Phase 27 additions
+  formal_bmc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SymbiYosys + Boolector
+        run: |
+          sudo apt-get install -y yosys python3-pip
+          pip install symbiyosys
+          sudo apt-get install -y boolector
+      - name: Run BMC (depth 30)
+        run: sby -f phase21_production/formal/core_props.sby
+      - name: Assert PASS
+        run: grep -q "PASS" phase21_production/formal/core_props/logfile.txt
+
+  compliance_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install riscv32 toolchain + Icarus
+        run: sudo apt-get install -y gcc-riscv64-unknown-elf iverilog python3-pip
+      - name: Clone riscv-arch-test
+        run: git clone --depth 1 https://github.com/riscv-non-isa/riscv-arch-test.git
+      - name: Run compliance suite
+        run: python3 phase27_compliance/tb/run_arch_tests.py --suite all
+      - name: Check all 245 tests pass
+        run: grep "PASS 245/245" compliance_result.txt
+```
+
+---
+
+### Phase 27 Completion Checklist
+
+```
+☐ SymbiYosys installed and working: `sby --version` outputs version string
+☐ BMC depth 30: P1 x0_invariant — PASS
+☐ BMC depth 30: P2 pc_aligned — PASS
+☐ BMC depth 30: P3 branch_flush_2_bubbles — PASS
+☐ BMC depth 30: P4 load_use_stall_correct — PASS
+☐ BMC depth 30: P5 reset_pc_zero — PASS
+☐ riscv-arch-test rv32i_m/I: all ~120 tests byte-exact match
+☐ riscv-arch-test rv32i_m/M: all ~40 tests pass
+☐ riscv-arch-test rv32i_m/A: all ~15 tests pass
+☐ riscv-arch-test rv32i_m/C: all ~60 tests pass
+☐ riscv-arch-test rv32i_m/Zicsr: all ~10 tests pass
+☐ Total: 245/245 compliance tests PASS
+☐ Toggle coverage: ≥ 98% across riscv_core.sv signals
+☐ Functional branch coverage: ≥ 95% across cache + pipeline state machines
+☐ coverage_report.html: generated and committed to docs/
+☐ GitHub Actions: formal_bmc and compliance_tests jobs green on every push
+☐ README: "✅ RISC-V Compliance: 245/245" and "✅ BMC: 5/5 PASS" badges
+```
+
+> ✅ **Resume Bullet**
+> *"Achieved formal verification of five pipeline safety properties via SymbiYosys BMC (depth 30, boolector engine) and complete RISC-V ISA compliance across 245 official architectural tests (rv32imac + Zicsr); integrated both into GitHub Actions CI with ≥98% toggle and ≥95% functional branch coverage closure."*
+
+🎯 **Interview Questions**
+- What does "bounded model checking to depth 30" guarantee, and what does it NOT guarantee about the design?
+- The RISC-V arch-test suite uses a "signature" — explain what a signature is, how it is produced by the test program, and why byte-exact comparison is the correct verification method.
+- What is the difference between toggle coverage and functional/branch coverage, and which is more relevant for verifying a protocol state machine like the AXI crossbar?
+- If BMC finds a counterexample for P3 (branch flush should produce 2 bubbles), describe the sequence of events that sby would show in the VCD trace.
+
+---
+
+## PHASE 28 — Out-of-Order Execution (Tomasulo Algorithm)
+### ⏱ Weeks 30–40
+
+The in-order 5-stage pipeline stalls on every load-use dependence, every multi-cycle
+multiply, and every cache miss.
+With Dhrystone at 1.05 DMIPS/MHz (Phase 24), the pipeline averages ~1 CPI on integer
+code but drops significantly on memory-bound or mixed workloads.
+This phase replaces the in-order execute stage with a Tomasulo out-of-order engine:
+reservation stations hold instructions until operands are ready (eliminating
+structural and RAW stalls), a reorder buffer maintains precise exception semantics, and
+a register alias table performs register renaming (eliminating WAR/WAW hazards).
+Target: ≥ 1.6× improvement in Dhrystone vs. Phase 24 baseline.
+
+This is the most complex phase in the project. It is also the most differentiated item
+on a VLSI/CPU design resume.
+
+---
+
+### 28.1 Architecture Overview
+
+The out-of-order engine replaces only the execute stage.
+Fetch, decode, and writeback remain largely unchanged.
+The pipeline becomes:
+
+```
+Fetch (in-order) → Decode/Issue (in-order) → Dispatch (rename+issue to RS)
+    → Execute (out-of-order, multiple functional units)
+    → Complete (write to ROB via CDB)
+    → Commit/Retire (in-order, from ROB head)
+```
+
+Key structures:
+
+| Structure | Size | Purpose |
+|---|---|---|
+| Reorder Buffer (ROB) | 16 entries | Holds instructions in program order; ensures in-order commit |
+| Reservation Stations (RS) | 4 per FU | Hold waiting instructions; wake up when operands arrive on CDB |
+| Register Alias Table (RAT) | 32 entries | Maps architectural register → ROB entry for renaming |
+| Common Data Bus (CDB) | 1 broadcast/cycle | Broadcasts completed results to all RSes and ROB |
+
+**Functional units:**
+
+| Unit | Latency | RS entries | Notes |
+|---|---|---|---|
+| ALU | 1 cycle | 4 | ADD/SUB/AND/OR/XOR/shift/compare |
+| MUL | 1 cycle | 2 | MUL/MULH/MULHSU/MULHU (fast_mul.sv) |
+| DIV | 32 cycles | 1 | DIV/DIVU/REM/REMU (existing divider) |
+| MEM | 2–10 cycles | 4 | LW/LH/LB/SW/SH/SB + D-cache |
+| BR  | 1 cycle | 2 | Branch/JAL/JALR — mispredict flushes ROB |
+
+---
+
+### 28.2 Reorder Buffer — `rob.sv`
+
+```systemverilog
+module rob #(
+    parameter N_ROB = 16   // must be power of 2
+)(
+    input  logic        clk, rst_n,
+    // Dispatch port (from decode/rename)
+    input  logic        dispatch_valid,
+    input  logic [4:0]  dispatch_arch_rd,  // architectural destination register
+    input  logic [31:0] dispatch_pc,
+    output logic [$clog2(N_ROB)-1:0] dispatch_rob_tag, // tag assigned to this instr
+    output logic        rob_full,
+    // Complete port (from CDB)
+    input  logic        cdb_valid,
+    input  logic [$clog2(N_ROB)-1:0] cdb_tag,
+    input  logic [31:0] cdb_data,
+    input  logic        cdb_exception,
+    input  logic [3:0]  cdb_cause,
+    // Commit port (in-order, from ROB head)
+    output logic        commit_valid,
+    output logic [4:0]  commit_rd,
+    output logic [31:0] commit_data,
+    output logic [31:0] commit_pc,
+    output logic        commit_exception,
+    input  logic        commit_ack          // from writeback: "I consumed this"
+);
+    typedef struct packed {
+        logic        valid;
+        logic        done;
+        logic [4:0]  arch_rd;
+        logic [31:0] data;
+        logic [31:0] pc;
+        logic        exception;
+        logic [3:0]  cause;
+    } rob_entry_t;
+
+    rob_entry_t entries [0:N_ROB-1];
+    logic [$clog2(N_ROB)-1:0] head, tail;
+
+    // Commit fires when entries[head].done == 1
+    assign commit_valid = entries[head].valid && entries[head].done;
+    assign commit_rd    = entries[head].arch_rd;
+    assign commit_data  = entries[head].data;
+    ...
+endmodule
+```
+
+**ROB flush on misprediction:** When a branch commits and its resolved direction
+differs from the prediction, assert `flush_rob` — clears all entries after the
+branch's ROB tag (which is now at or past head). ROB head and tail reset to the
+branch's ROB tag + 1. RAT must be restored to the committed register state.
+
+---
+
+### 28.3 Reservation Stations — `res_station.sv`
+
+```systemverilog
+module res_station #(
+    parameter N_RS  = 4,
+    parameter N_ROB = 16
+)(
+    input  logic        clk, rst_n,
+    // Issue port (from dispatch)
+    input  logic        issue_valid,
+    input  logic [3:0]  issue_opcode,
+    input  logic [31:0] issue_imm,
+    // Operand 1: either ready value or ROB tag
+    input  logic        issue_src1_ready,
+    input  logic [31:0] issue_src1_val,
+    input  logic [$clog2(N_ROB)-1:0] issue_src1_tag,
+    // Operand 2 similarly
+    input  logic        issue_src2_ready,
+    input  logic [31:0] issue_src2_val,
+    input  logic [$clog2(N_ROB)-1:0] issue_src2_tag,
+    input  logic [$clog2(N_ROB)-1:0] issue_rob_tag,  // for CDB write-back
+    output logic        rs_full,
+    // CDB broadcast — wakes up waiting RS entries
+    input  logic        cdb_valid,
+    input  logic [$clog2(N_ROB)-1:0] cdb_tag,
+    input  logic [31:0] cdb_data,
+    // Fire port (to functional unit)
+    output logic        fire_valid,
+    output logic [31:0] fire_src1, fire_src2, fire_imm,
+    output logic [$clog2(N_ROB)-1:0] fire_rob_tag,
+    output logic [3:0]  fire_opcode,
+    input  logic        fu_ready        // FU can accept a new instruction
+);
+```
+
+**CDB capture logic (most critical path):**
+
+```systemverilog
+// On every CDB broadcast, update waiting entries
+always_ff @(posedge clk) begin
+    for (int i = 0; i < N_RS; i++) begin
+        if (rs[i].valid) begin
+            if (!rs[i].src1_ready && cdb_valid && rs[i].src1_tag == cdb_tag) begin
+                rs[i].src1_val   <= cdb_data;
+                rs[i].src1_ready <= 1'b1;
+            end
+            if (!rs[i].src2_ready && cdb_valid && rs[i].src2_tag == cdb_tag) begin
+                rs[i].src2_val   <= cdb_data;
+                rs[i].src2_ready <= 1'b1;
+            end
+        end
+    end
+end
+```
+
+**Fire arbitration:** When multiple RS entries are ready (both operands available),
+fire the oldest one first (lowest ROB tag) to preserve fairness and maximize
+utilization on memory-bound loops.
+
+---
+
+### 28.4 Register Alias Table — `rat.sv`
+
+```systemverilog
+module rat #(parameter N_ROB = 16) (
+    input  logic        clk, rst_n,
+    // Rename port (at dispatch, one instruction per cycle)
+    input  logic        rename_valid,
+    input  logic [4:0]  rename_rs1, rename_rs2, rename_rd,
+    input  logic [$clog2(N_ROB)-1:0] rename_rob_tag,
+    // Lookup: for each source register, return (ready, value) OR (not ready, rob_tag)
+    output logic        rs1_ready,  rs2_ready,
+    output logic [31:0] rs1_val,    rs2_val,
+    output logic [$clog2(N_ROB)-1:0] rs1_tag, rs2_tag,
+    // Commit port (architectural register file update + RAT invalidation)
+    input  logic        commit_valid,
+    input  logic [4:0]  commit_rd,
+    input  logic [31:0] commit_data,
+    input  logic [$clog2(N_ROB)-1:0] commit_rob_tag,
+    // ROB flush: restore RAT to committed state
+    input  logic        flush_i
+);
+    // Two tables:
+    // 1. Mapping table: rat_map[rd] = {valid, rob_tag} — is rd currently mapped?
+    // 2. Architectural RF (committed state): arch_rf[31:0][31:0]
+    logic [N_ROB_BITS-1:0] rat_map [0:31];
+    logic                  rat_valid [0:31];
+    logic [31:0]           arch_rf  [0:31];
+
+    // On rename: set rat_map[rd] = new rob_tag, rat_valid[rd] = 1
+    // On lookup: if rat_valid[rs1], return (not_ready, rat_map[rs1]);
+    //            else return (ready, arch_rf[rs1])
+    // On commit: arch_rf[rd] = data; if rat_map[rd]==commit_tag, rat_valid[rd]=0
+    // On flush:  rat_valid[:] = 0 (restore to arch_rf baseline)
+```
+
+---
+
+### 28.5 Common Data Bus — `cdb.sv`
+
+With multiple functional units that can complete in the same cycle, the CDB must
+arbitrate between them.
+Use a fixed priority (ALU > MEM > MUL > DIV) with one broadcast slot per cycle:
+
+```systemverilog
+module cdb #(parameter N_ROB=16) (
+    // One input per functional unit
+    input  logic        alu_valid, mem_valid, mul_valid, div_valid,
+    input  logic [31:0] alu_data,  mem_data,  mul_data,  div_data,
+    input  logic [$clog2(N_ROB)-1:0] alu_tag, mem_tag, mul_tag, div_tag,
+    // One broadcast output (to all RSes and ROB simultaneously)
+    output logic        cdb_valid,
+    output logic [31:0] cdb_data,
+    output logic [$clog2(N_ROB)-1:0] cdb_tag,
+    // Backpressure: stall the losing FU for 1 cycle
+    output logic        alu_stall, mem_stall, mul_stall, div_stall
+);
+    // Priority encode: pick one valid FU per cycle
+    always_comb begin
+        cdb_valid = alu_valid | mem_valid | mul_valid | div_valid;
+        if      (alu_valid) {cdb_tag, cdb_data} = {alu_tag, alu_data};
+        else if (mem_valid) {cdb_tag, cdb_data} = {mem_tag, mem_data};
+        else if (mul_valid) {cdb_tag, cdb_data} = {mul_tag, mul_data};
+        else                {cdb_tag, cdb_data} = {div_tag, div_data};
+    end
+    assign alu_stall = !alu_valid && (mem_valid | mul_valid | div_valid) ? 1'b0 :
+                       (mem_valid | mul_valid | div_valid) && alu_valid;
+    // etc. — stall the FU that lost arbitration this cycle
+endmodule
+```
+
+---
+
+### 28.6 Integration — `ooo_core.sv`
+
+`ooo_core.sv` replaces `riscv_core.sv` as the top-level CPU module.
+It instantiates: `fetch_stage`, `decode_stage`, `rat`, `rob`, `res_station` (one per
+FU type), ALU FU, MEM FU, MUL FU, DIV FU, `cdb`, `writeback_stage`.
+
+**Key interfaces that don't change (backward compatible with soc_top):**
+- `imem_addr_o / imem_rdata_i` — instruction memory interface
+- `dmem_*` — data memory AXI interface
+- `debug_*` — debug module interface (halt/resume/register read)
+- `irq_i` — interrupt input
+- `csr_*` — CSR interface (exception/interrupt handling still in-order at commit)
+
+**Critical implementation constraint:** Load instructions must not be speculatively
+executed past a store to an alias address (memory disambiguation).
+Use a conservative load-store queue: loads check all pending store addresses before
+firing; if any store address is unknown (rs1 not ready), the load waits.
+
+---
+
+### 28.7 Icarus Verilog Compatibility Notes for OoO
+
+Several new constructs appear in the OoO engine that need care for Icarus 12:
+
+- `struct packed` inside `always_ff`: Icarus handles packed structs in `logic` arrays
+  correctly but does NOT allow field-select inside `always_comb`. Use flat `logic`
+  vectors and `assign` aliases externally.
+- `for` loops with parameter-derived bounds inside `always_ff`: always use an `integer`
+  loop variable, not `int` or `logic`.
+- Multiple `always_ff` blocks with the same sensitivity list: permitted in Icarus
+  if no net is driven from two blocks (no multi-driver). The ROB and RS each use a
+  single `always_ff`.
+
+---
+
+### 28.8 Performance Targets
+
+| Benchmark | In-order (Phase 24) | OoO Target | Method |
+|---|---|---|---|
+| Dhrystone | 1.05 DMIPS/MHz | ≥ 1.7 DMIPS/MHz | mcycle measurement |
+| CoreMark | 2.35 CM/MHz | ≥ 3.5 CM/MHz | mcycle measurement |
+| Load-use stall rate | ~15% cycles | ≤ 3% cycles | waveform counter |
+| MUL throughput | 1 MUL per 3 cycles (issue+stall) | 1 MUL per 1.2 cycles (OoO) | MUL-heavy loop |
+
+The ≥60% Dhrystone improvement target is achievable because Dhrystone is ~30% loads,
+~20% multiplies, and ~50% integer — OoO hides all load latency and MUL multi-cycle
+penalties.
+
+---
+
+### Phase 28 Completion Checklist
+
+```
+☐ rob.sv: in-order commit verified — instruction at head commits before instructions at head+1
+☐ rob.sv: ROB flush on branch misprediction — all entries after branch tag cleared
+☐ rob.sv: exception at ROB head — precise exception: all prior instructions committed first
+☐ res_station.sv: CDB capture — waiting entry updates src_val correctly when CDB broadcasts
+☐ res_station.sv: oldest-ready-first arbitration — ROB tag priority fire verified
+☐ rat.sv: rename/lookup/commit round-trip — arch_rf matches architectural register state at commit
+☐ rat.sv: RAT flush restores all mappings to committed state (rat_valid[] cleared)
+☐ cdb.sv: two FUs complete same cycle — exactly one broadcasts; other deferred by 1 cycle
+☐ Load-store ordering: load after store to same address returns the store's value
+☐ ooo_core.sv: all Phase 1 RV32I tests pass (22/22 regressions)
+☐ ooo_core.sv: all Phase 13 compliance tests pass (71/71 regressions)
+☐ ooo_core.sv: Phase 21 ISS co-simulation — 76/76 tests pass
+☐ Dhrystone: ≥ 1.7 DMIPS/MHz measured — TRM updated
+☐ CoreMark: ≥ 3.5 CM/MHz measured — TRM updated
+☐ Load-use stall counter: ≤ 3% cycles in Dhrystone run
+```
+
+> ✅ **Resume Bullet**
+> *"Implemented Tomasulo out-of-order execution engine with 16-entry ROB, 4-entry reservation stations per functional unit, register alias table with ROB tag renaming, and CDB arbitration; achieved ≥60% Dhrystone improvement over the in-order baseline while maintaining precise exception semantics and full RV32IMAC compliance."*
+
+🎯 **Interview Questions**
+- Walk through a RAW hazard between `MUL x3, x1, x2` followed by `ADD x4, x3, x5` in Tomasulo: trace the ROB tag from dispatch of MUL through CDB broadcast to ADD firing.
+- What is the purpose of the reorder buffer and how does it provide precise exception semantics in an out-of-order core?
+- What is WAW (write-after-write) hazard and how does register renaming via the RAT eliminate it?
+- If two functional units (ALU and MEM) complete in the same cycle and both want to broadcast on the CDB, what happens to the losing unit's result and how is forward progress guaranteed?
+- Why must loads check all pending store addresses before executing, and what is the simplest conservative disambiguation policy that is always correct (even if sometimes slow)?
+
+---
+
 ## Complete Phase Status Table
 
 | Phase | Module | Duration | Status |
@@ -2776,20 +4595,27 @@ It must cover:
 | 4 | 4×4 systolic MAC array accelerator | — | ✅ |
 | 5 | Full SoC integration | — | ✅ |
 | 6 | OpenLane GDSII synthesis on Sky130A | — | ✅ |
-| 7 | FPGA portability · M extension · GCC toolchain | 4 weeks | ⏳ |
-| 8 | Peripheral suite: UART · GPIO · Timer · SPI · CLINT · PLIC | 4 weeks | ⏳ |
-| 9 | 16×16 INT8 accelerator · 128-bit scratchpad · DMA | 4 weeks | ⏳ |
-| 10 | DDR3 memory · multi-board BSP | 3 weeks | ⏳ |
-| 11 | FreeRTOS · C inference library · Python quant tool | 4 weeks | ⏳ |
-| 12 | Multi-board validation · benchmarks · example projects | 3 weeks | ⏳ |
-| 13 | ISA completeness: RVC + RVA + CSRs + exceptions + PMP + ACT | 4 weeks | ⏳ |
-| 14 | Hardware debug: DM 0.13 + JTAG TAP + OpenOCD/GDB + HW breakpoints | 5 weeks | ⏳ |
-| 15 | CPU performance: I-cache + branch predictor + DSP MUL | 4 weeks | ⏳ |
-| 16 | Firmware stack: UART bootloader + newlib + Vivado TCL + CI/CD | 3 weeks | ⏳ |
-| 17 | Peripheral completeness: I2C + WDT + TRNG + DMA UART/SPI | 4 weeks | ⏳ |
-| 18 | AI accelerator v3: INT4 + operator lib + scatter-gather DMA + ONNX | 6 weeks | ⏳ |
-| 19 | Security: secure boot + AES-128/256 + SHA-256/SHA-3 + PMP isolation | 4 weeks | ⏳ |
-| 20 | Architecture hardening: parameterized crossbar + CRU + DFT scan | 4 weeks | ⏳ |
-| 21 | Production verification: riscv-dv + formal SVA + coverage closure | 5 weeks | ⏳ |
-| 22 | Portability & ecosystem: DE1-SoC + ECP5 + Zephyr + SDK + TRM | 6 weeks | ⏳ |
+| 7 | FPGA portability · M extension · GCC toolchain | 4 weeks | ✅ |
+| 8 | Peripheral suite: UART · GPIO · Timer · SPI · CLINT · PLIC | 4 weeks | ✅ |
+| 9 | 16×16 INT8 accelerator · 128-bit scratchpad · DMA | 4 weeks | ✅ |
+| 10 | DDR3 memory · multi-board BSP | 3 weeks | ✅ |
+| 11 | FreeRTOS · C inference library · Python quant tool | 4 weeks | ✅ |
+| 12 | Multi-board validation · benchmarks · example projects | 3 weeks | ✅ |
+| 13 | ISA completeness: RVC + RVA + CSRs + exceptions + PMP + ACT | 4 weeks | ✅ |
+| 14 | Hardware debug: DM 0.13 + JTAG TAP + OpenOCD/GDB + HW breakpoints | 5 weeks | ✅ |
+| 15 | CPU performance: I-cache + branch predictor + DSP MUL | 4 weeks | ✅ |
+| 16 | Firmware stack: UART bootloader + newlib + Vivado TCL + CI/CD | 3 weeks | ✅ |
+| 17 | Peripheral completeness: I2C + WDT + TRNG + DMA UART/SPI | 4 weeks | ✅ |
+| 18 | AI accelerator v3: INT4 + operator lib + scatter-gather DMA + ONNX | 6 weeks | ✅ |
+| 19 | Security: secure boot + AES-128/256 + SHA-256/SHA-3 + PMP isolation | 4 weeks | ✅ |
+| 20 | Architecture hardening: parameterized crossbar + CRU + DFT scan | 4 weeks | ✅ |
+| 21 | Production verification: riscv-dv + formal SVA + coverage closure | 5 weeks | ✅ |
+| 22 | Portability & ecosystem: DE1-SoC + ECP5 + Zephyr + SDK + TRM | 6 weeks | ✅ |
+| 23 | RTL reliability: I-cache wiring · AXI4 burst · 2-way ECC cache · TRNG · CDC | 4 weeks | ⏳ |
+| 24 | Real hardware validation · DDR3 MIG · CI/CD · TRM hosting | 4 weeks | ⏳ |
+| 25 | AI accelerator v4: 16×16 PE · 64×64 tiled · weight SRAM · 128-bit DMA | 9 weeks | ⏳ |
+| 26 | S-mode privilege · Sv32 MMU · TLB · PTW · OpenSBI · Linux boot | 8 weeks | ⏳ |
+| 27 | Formal BMC · RISC-V compliance suite · full CI/CD · coverage closure | 4 weeks | ⏳ |
+| 28 | Out-of-order execution: ROB · reservation stations · RAT · CDB · Tomasulo | 11 weeks | ⏳ |
+| **Total (P23–28)** | | **~40 weeks** | |
 | **Total (P13–22)** | | **~45 weeks** | |
