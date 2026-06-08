@@ -3708,7 +3708,306 @@ __attribute__((aligned(16))) const int8_t fc1_weights[4096] = { ... };
 
 ---
 
-### 25.7 Performance Targets at 100 MHz
+### 25.7 Output Accumulation SRAM — `out_accum_sram.sv`
+
+The tiling controller accumulates partial sums across `tile_k` iterations:
+`out_accum[tm][tn][i][j] += sa_y[i][j]` for each `tile_k`.
+For a 64×64 output (4×4 = 16 output tiles × 16×16 INT32 = 16 KB), this accumulation
+state cannot live in registers — it needs its own dedicated SRAM.
+
+**This was missing from the original Phase 25 description and must be added.**
+
+```systemverilog
+// out_accum_sram.sv — 16 KB INT32 accumulator SRAM
+// Indexed by output tile position: [tm][tn][row][col]
+// tm,tn in 0..3 (4 output tile rows/cols for 64×64), row,col in 0..15
+// Flat address: (tm*4 + tn)*256 + row*16 + col  =  0..4095 words (16 KB)
+module out_accum_sram #(parameter DEPTH = 4096) (
+    input  logic        clk,
+    // Accumulate port (tiling controller writes after each tile_k)
+    input  logic        acc_we,
+    input  logic [11:0] acc_addr,        // [tm*4+tn]*256 + i*16+j
+    input  logic [31:0] acc_wdata,       // new partial sum to add
+    input  logic        acc_clear,       // 1 on first tile_k: write instead of add
+    // Read port (for DMA write-out after last tile_k)
+    input  logic [11:0] rd_addr,
+    output logic [31:0] rd_data,
+    // Partial sum output (to DMA write-out path)
+    output logic [31:0] acc_rdata        // registered read for accumulate-add path
+);
+    logic [31:0] mem [0:DEPTH-1];
+    logic [31:0] prev;
+
+    always_ff @(posedge clk) begin
+        prev <= mem[acc_addr];           // read old value 1 cycle before write
+        if (acc_we) begin
+            mem[acc_addr] <= acc_clear ? acc_wdata          // first tile_k: overwrite
+                                       : prev + acc_wdata;  // subsequent: accumulate
+        end
+        rd_data   <= mem[rd_addr];
+        acc_rdata <= prev;
+    end
+endmodule
+```
+
+**Tiling controller integration:**
+- `acc_clear` is asserted when `tile_k == 0` (first iteration for this `(tm,tn)` tile)
+- `acc_we` is asserted for 256 cycles after each `sa_done` to write all 16×16 outputs
+- After the last `tile_k`, the DMA reads the accumulated 1 KB tile from `rd_addr`
+  port and writes it to `OUT_BASE + (tm*TN + tn)*1024` in system memory
+
+**Overflow analysis:**
+INT4 × INT4 → INT8 (product fits in 8 bits: max |(-8)×7| = 56).
+Summing 16 INT8 products across a single tile_k row → max |16 × 56| = 896 → INT16
+(fits in 16 bits with headroom).
+Summing across 4 tile_k iterations: max |4 × 896| = 3584 → still INT16, well within
+INT32. **No overflow is possible for 64×64 INT4 with 32-bit accumulator.** This
+analysis must be rerun if K > 256 (where 16 × |product| × ceil(K/16) could approach
+INT32 range).
+
+---
+
+### 25.8 AXI System Bus Wiring — Connecting the 128-bit DMA to System Memory
+
+**This was the most critical missing piece in the original Phase 25 description.**
+
+The `accel_dma_v2` has a 128-bit AXI4 master. The SoC crossbar (`axi4_crossbar_param.sv`)
+is 32-bit AXI4-Lite. These are incompatible at the bus level.
+The solution is a **dedicated DMA bypass port** on the DDR3 MIG, separate from the
+32-bit SoC crossbar path.
+
+MIG 7-series supports two AXI slave ports. Port 0 is already used by the SoC (32-bit
+via width converter). Port 1 is wired directly to `accel_dma_v2`:
+
+```
+                         ┌─────────────────────────────────┐
+  CPU D-cache (32b) ─────┤ AXI Width Conv 32→128 → MIG S0  │
+  CPU MMIO bypass (32b) ─┤ → APB bridge                    │  DDR3 DRAM
+  CPU I-cache (32b) ─────┤ 32b crossbar NM=4               │
+  sg_dma Phase18 (32b) ──┤                                  │
+                         ├─────────────────────────────────┤
+  accel_dma_v2 (128b) ───┤ direct → MIG S1 (128b)         │
+                         └─────────────────────────────────┘
+```
+
+In `soc_top.sv`, add the second MIG port and wire accel_dma_v2 directly:
+
+```systemverilog
+// soc_top.sv — Phase 25 additions
+
+// accel_dma_v2 AXI4 master signals (128-bit)
+logic        dma2_arvalid, dma2_arready, dma2_rvalid, dma2_rready, dma2_rlast;
+logic [31:0] dma2_araddr;
+logic [7:0]  dma2_arlen;
+logic [2:0]  dma2_arsize;
+logic [1:0]  dma2_arburst;
+logic [127:0] dma2_rdata;
+logic        dma2_awvalid, dma2_awready, dma2_wvalid, dma2_wready;
+logic        dma2_wlast,   dma2_bvalid,  dma2_bready;
+logic [127:0] dma2_wdata;
+logic [15:0] dma2_wstrb;
+logic [31:0] dma2_awaddr;
+logic [7:0]  dma2_awlen;
+
+accel_dma_v2 u_accel_dma (
+    .clk        (clk),   .rst_n      (rst_n),
+    .start_i    (tc_dma_start),
+    .src_addr_i (tc_dma_src),
+    .dst_addr_i (tc_dma_dst),
+    .byte_len_i (tc_dma_len),
+    .direction_i(tc_dma_dir),
+    .done_o     (tc_dma_done),
+    // 128-bit AXI4 master — wired to MIG S1 directly
+    .m_arvalid  (dma2_arvalid), .m_arready  (dma2_arready),
+    .m_araddr   (dma2_araddr),  .m_arlen    (dma2_arlen),
+    .m_arsize   (dma2_arsize),  .m_arburst  (dma2_arburst),
+    .m_rvalid   (dma2_rvalid),  .m_rready   (dma2_rready),
+    .m_rdata    (dma2_rdata),   .m_rlast    (dma2_rlast),
+    .m_awvalid  (dma2_awvalid), .m_awready  (dma2_awready),
+    .m_awaddr   (dma2_awaddr),  .m_awlen    (dma2_awlen),
+    .m_wvalid   (dma2_wvalid),  .m_wready   (dma2_wready),
+    .m_wdata    (dma2_wdata),   .m_wstrb    (dma2_wstrb),
+    .m_wlast    (dma2_wlast),   .m_bvalid   (dma2_bvalid),
+    .m_bready   (dma2_bready),
+    // Local SRAM write port (into weight_sram or act_buffer)
+    .sram_we    (dma2_sram_we),
+    .sram_addr  (dma2_sram_addr),
+    .sram_wdata (dma2_sram_wdata)
+);
+
+// MIG S1 port wired to accel_dma_v2 128-bit master (in mem_ddr3_xilinx.sv)
+mem_ddr3_xilinx u_ddr3 (
+    ...
+    // S0 — 32-bit path from SoC crossbar (via width converter)
+    .s0_axi_arvalid (m_arvalid_s0), ...
+    // S1 — 128-bit path from accel DMA (new)
+    .s1_axi_arvalid (dma2_arvalid),
+    .s1_axi_araddr  (dma2_araddr),
+    .s1_axi_arlen   (dma2_arlen),
+    .s1_axi_arsize  (dma2_arsize),
+    .s1_axi_arburst (dma2_arburst),
+    .s1_axi_arready (dma2_arready),
+    .s1_axi_rvalid  (dma2_rvalid),
+    .s1_axi_rdata   (dma2_rdata),   // 128-bit
+    .s1_axi_rready  (dma2_rready),
+    .s1_axi_rlast   (dma2_rlast),
+    // ... write channel analogously
+);
+```
+
+> ⚠️ **Simulation stub:** In `mem_ddr3_xilinx.sv` under `` `ifndef SYNTHESIS ``, add a
+> second 128-bit BRAM model for the S1 port so the DMA can be tested in Icarus simulation
+> without real MIG:
+> ```systemverilog
+> `ifndef SYNTHESIS
+>     // S1 sim model: 128-bit wide BRAM (shares same backing array as S0 model)
+>     logic [127:0] sim_mem_128 [0:16383];  // 256 KB at 128-bit width
+>     // Respond to dma2_ar* / dma2_r* exactly as a burst SRAM would
+> `endif
+> ```
+
+**Crossbar master count:** After Phase 23 (NM=4) + Phase 25, the 32-bit crossbar stays
+at NM=4. The accel DMA uses the dedicated MIG S1 port and does NOT go through the
+crossbar — this is intentional to avoid saturating the shared bus during weight loads.
+
+---
+
+### 25.9 soc_top.sv Wiring — Accelerator Control Path and IRQ
+
+**Three connections in `soc_top.sv` that Phase 25 requires but were not described:**
+
+#### 25.9.1 CPU → accel_top_v4 control register path
+
+The old accelerator (Phase 18) was reached via APB at 0x5000_xxxx.
+`accel_top_v4` has an AXI4-Lite slave interface.
+The cleanest fix: change the crossbar slave S2 decode from "APB bridge for
+0x5000_xxxx" to a direct AXI4-Lite connection for the accelerator registers, and
+keep the APB bridge only for 0x1000_xxxx.
+
+In `axi4_crossbar_param.sv`, update the slave address decode:
+```
+S0: 0x0000_xxxx → SRAM/DDR3
+S1: 0x1000_xxxx → APB bridge (all peripherals)
+S2: 0x5000_xxxx → accel_top_v4 AXI4-Lite slave  ← changed from old accel
+```
+
+`accel_top_v4`'s AXI4-Lite slave connects to crossbar M_any → S2:
+
+```systemverilog
+// soc_top.sv — accelerator AXI4-Lite wiring
+accel_top_v4 u_accel (
+    .clk          (clk),
+    .rst_n        (rst_n),
+    // AXI4-Lite slave (control registers from CPU)
+    .s_awvalid    (xbar_s2_awvalid),
+    .s_awaddr     (xbar_s2_awaddr[11:0]),
+    .s_awready    (xbar_s2_awready),
+    .s_wvalid     (xbar_s2_wvalid),
+    .s_wdata      (xbar_s2_wdata),
+    .s_wstrb      (xbar_s2_wstrb),
+    .s_wready     (xbar_s2_wready),
+    .s_bvalid     (xbar_s2_bvalid),
+    .s_bready     (xbar_s2_bready),
+    .s_arvalid    (xbar_s2_arvalid),
+    .s_araddr     (xbar_s2_araddr[11:0]),
+    .s_arready    (xbar_s2_arready),
+    .s_rvalid     (xbar_s2_rvalid),
+    .s_rdata      (xbar_s2_rdata),
+    .s_rready     (xbar_s2_rready),
+    // DMA control (to/from accel_dma_v2 — internal wiring)
+    .tc_dma_start (tc_dma_start),
+    .tc_dma_src   (tc_dma_src),
+    .tc_dma_dst   (tc_dma_dst),
+    .tc_dma_len   (tc_dma_len),
+    .tc_dma_dir   (tc_dma_dir),
+    .tc_dma_done  (tc_dma_done),
+    // Done IRQ output
+    .irq_done_o   (accel_irq)
+);
+```
+
+#### 25.9.2 Accelerator done IRQ → PLIC
+
+The Phase 8 PLIC has 8 IRQ sources (IRQ 1–8).
+Assign accelerator done IRQ to **IRQ 8** (the last PLIC source, was unassigned):
+
+```systemverilog
+// soc_top.sv — PLIC source wiring update
+plic u_plic (
+    .src_i ({accel_irq,   // [7] = IRQ 8 (NEW — accelerator done)
+             trng_irq,    // [6] = IRQ 7
+             wdt_irq,     // [5] = IRQ 6
+             i2c_irq,     // [4] = IRQ 5
+             spi_irq,     // [3] = IRQ 4
+             timer_irq,   // [2] = IRQ 3
+             gpio_irq,    // [1] = IRQ 2
+             uart_irq}),  // [0] = IRQ 1
+    ...
+);
+```
+
+Update `phase22_portability/sdk/bsp/include/soc.h` to add:
+```c
+#define IRQ_ACCEL  8    // accelerator done (new)
+```
+
+#### 25.9.3 Register map compatibility — old vs new accelerator
+
+The old `accel_top` (Phase 18) was reached at 0x50000000 with APB registers:
+`CTRL=0x00`, `W_ROW_r=0x08+r*4`, `A_VEC=0x28`, `Y_c=0x100+c*4`.
+
+The new `accel_top_v4` has different registers (`DIM_M=0x08`, `DIM_K=0x0C`, etc.).
+**Do not reuse the same base address silently.**
+
+Assign `accel_top_v4` to **0x50010000** (offset within 0x5000_xxxx space),
+keeping `accel_top` (old) at 0x50000000 for backward compatibility during transition.
+The crossbar S2 decode covers the entire 0x5000_xxxx range — both are reachable.
+Update the `ACCEL_BASE` in `soc.h` only after the old driver is replaced:
+
+```c
+// soc.h — Phase 25 onwards
+#define ACCEL_BASE      0x50000000UL    // old 4×4 accel (Phase 18, kept for regression)
+#define ACCEL_V4_BASE   0x50010000UL    // new 64×64 tiled accel (Phase 25)
+```
+
+Update `accel.h` in the SDK to add the new API alongside the old one (not replacing it)
+until all firmware is migrated.
+
+---
+
+### 25.10 Quantization Scale Factor Correctness for Tiled Accumulation
+
+When a K=64 matrix multiply is tiled into 4 tile_k iterations of K=16 each, the
+partial sums are accumulated in INT32 across iterations.
+The question is: does the per-layer `scale_factor` from the ONNX→C tool remain correct?
+
+**Answer: yes — the scale factor is unchanged.**
+The requantize formula is:
+`out_int8[i][j] = clamp( round( C_int32[i][j] / scale ), -128, 127 )`
+where `C_int32 = Σ_{k=0}^{K-1} A_int4[i,k] × B_int4[k,j]`.
+Splitting the sum into tiles does not change the total: `C_int32_tiled = Σ_{t=0}^{3} partial_t`
+which equals `C_int32_full` exactly. No scale adjustment is needed.
+
+**Overflow check:**
+Maximum value of one INT4 product: `|(-8) × 7| = 56` (INT4 range is -8..7).
+Maximum value of K=64 accumulated products: `64 × 56 = 3584`.
+This is far below INT32_MAX (2,147,483,647). Tiled accumulation is safe.
+
+If future networks have K > 38,347,922 (unlikely), overflow becomes possible.
+Add a static assert in the ONNX tool:
+```python
+assert K <= 2**31 // (2**(ACT_W-1)) ** 2, "K too large for INT32 accumulator"
+```
+
+**Update `onnx_to_c.py`** to emit the overflow assertion and a comment in the header:
+```c
+// weights_fc1.h
+// Accumulator range check: K=64, ACT_W=4 → max_accum=3584 << INT32_MAX ✓
+```
+
+---
+
+### 25.11 Performance Targets at 100 MHz
 
 | Operation | Dimensions | Tile Iterations | Cycles | Latency |
 |-----------|-----------|-----------------|--------|---------|
@@ -3728,25 +4027,33 @@ Peak INT4 throughput: 16×16×2 MACs/cycle × 100 MHz = **51.2 GOPS**.
 ☐ tiling_controller.sv: 64×64×64 matmul produces correct INT32 output vs NumPy reference
 ☐ weight_sram.sv: 256-byte tile DMA load in ≤ 16 cycles (128-bit DMA)
 ☐ act_buffer.sv: double-buffer flip correct — no bubble between tiles
+☐ out_accum_sram.sv: partial sums accumulate correctly across 4 tile_k iterations
+☐ out_accum_sram.sv: acc_clear resets on tile_k=0; accumulate on tile_k>0 — verified
 ☐ accel_dma_v2.sv: 128-bit AXI4 burst; ARLEN/ARSIZE/ARBURST correct; rlast terminates
+☐ accel_dma_v2: wired to MIG S1 (128-bit direct port) — NOT through 32-bit crossbar
+☐ MIG S1 sim stub: 128-bit BRAM model responds correctly to DMA burst in Icarus
+☐ soc_top.sv: accel_top_v4 at 0x50010000 on crossbar S2; old accel kept at 0x50000000
+☐ PLIC: accel_irq wired to IRQ source 8; IRQ_ACCEL=8 in soc.h
+☐ soc.h: ACCEL_V4_BASE=0x50010000 added; existing ACCEL_BASE unchanged
 ☐ 16×16 tile latency: ≤ 40 cycles from start_i to sa_done
 ☐ 64×64 full matmul: total latency ≤ 2600 cycles (64 tiles + DMA overhead)
 ☐ INT4 packing: 2 INT4 per DSP48E1 — 256 MACs fits in ≤ 128 DSPs (Artix-7 budget)
-☐ onnx_to_c.py: tiled weight layout emitted correctly; verified round-trip
+☐ onnx_to_c.py: tiled weight layout emitted; overflow assertion added; round-trip verified
 ☐ test_accel_v4.py: 64×64 golden matmul passes; edge cases (M/K/N not multiples of 16)
 ☐ MNIST FC network (784→128→10): inference correct; latency ≤ 100 µs
-☐ Phase 18 regression: all 59 original accelerator tests still pass
+☐ Phase 18 regression: all 59 original accelerator tests still pass (accel_top unchanged)
 ```
 
 > ✅ **Resume Bullet**
-> *"Scaled the INT4 systolic array from 4×4 to 16×16 physical PEs (256 MACs, 51.2 GOPS peak) with a tiling controller supporting up to 64×64 matrix dimensions, a 64 KB weight SRAM, double-buffered 16 KB activation SRAM, and a 128-bit AXI4 DMA engine; completed a 64×64×64 INT4 GEMM in 25.6 µs at 100 MHz with correct NumPy-verified output."*
+> *"Scaled the INT4 systolic array from 4×4 to 16×16 physical PEs (256 MACs, 51.2 GOPS peak) with a tiling controller, output accumulation SRAM, double-buffered activation SRAM, and a 128-bit AXI4 DMA connected directly to a dedicated MIG port (bypassing the 32-bit crossbar); completed a 64×64×64 INT4 GEMM in 25.6 µs at 100 MHz; IRQ-signalled done wired to PLIC; old accelerator preserved for regression."*
 
 🎯 **Interview Questions**
 - Why does a 16×16 physical PE array support "64×64" matrix multiply, and what is the role of the tiling controller?
 - Explain how two INT4 MACs can share one DSP48E1. What constraint does this place on the bit widths of A and B inputs?
 - What is double buffering in the context of the activation SRAM and why does it eliminate pipeline bubbles between tiles?
-- If the tiling controller must load a 256-byte weight tile from DDR3 at 128-bit width, calculate ARLEN and the number of clock cycles required.
-- Why must weights be stored in tile-major rather than row-major order for efficient DMA loading?
+- Why does the 128-bit DMA bypass the 32-bit AXI crossbar rather than go through an AXI width converter?
+- Prove that INT32 accumulation cannot overflow for a 64×64 INT4 matrix multiply.
+- Why does the output accumulation SRAM need an `acc_clear` signal, and what bug occurs if it is missing?
 
 ---
 
